@@ -1,0 +1,37 @@
+[Unit]
+# systemd unit to auto-start the G1 head-camera frame server on the Jetson, so the
+# laptop's head_cam_localize.py can localize the robot base without anyone SSHing in.
+# Install: see the comments at the bottom (it lives on the JETSON at
+# /etc/systemd/system/g1-headcam.service, NOT on the laptop).
+Description=G1 head-camera AprilTag frame server (laptop base localization)
+After=network-online.target
+Wants=network-online.target
+# Never run at the same time as the SONIC camera server — they both want the D435.
+Conflicts=composed_camera_server.service
+
+[Service]
+Type=simple
+User=unitree
+WorkingDirectory=/home/unitree
+ExecStart=/usr/bin/python3 /home/unitree/g1_headcam_server.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+
+# ── Install on the Jetson (one time) ─────────────────────────────────────────
+#   # g1_headcam_server.py must already be at /home/unitree/ (you scp'd it).
+#   # verify the interpreter has the deps:
+#   which python3 && python3 -c "import pyrealsense2, cv2; print('ok')"
+#   # copy this unit into place:
+#   sudo cp ~/g1-headcam.service /etc/systemd/system/g1-headcam.service
+#   # stop SONIC from grabbing the camera at boot, enable ours:
+#   sudo systemctl disable --now composed_camera_server.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now g1-headcam.service
+#   systemctl status g1-headcam.service --no-pager
+#
+# ── Swap back to the SONIC camera stack later ────────────────────────────────
+#   sudo systemctl disable --now g1-headcam.service
+#   sudo systemctl enable --now composed_camera_server.service

@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+dist/
+build/
+*.egg-info/
+xr_recordings/
+recordings/
+config/XRT_user_study_manager.json
+projects/inspire_hand_teleop/*_calibration.json
+

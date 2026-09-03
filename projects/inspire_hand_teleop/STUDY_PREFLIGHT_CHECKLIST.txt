@@ -1,0 +1,118 @@
+========================================================================
+  G1 USER STUDY — PRE-FLIGHT CHECKLIST & OPERATING ORDER
+  (opened from the manager's "Pre-Flight Checklist" button)
+========================================================================
+Master = robot 1 (has the 2 external RealSense crate cameras).
+Peer   = robot 2 (no external cameras; contributes its head cam).
+Edit this file freely — it's just a text doc next to the manager.
+
+------------------------------------------------------------------------
+A. ONCE PER STUDY (not per participant, not per group)
+------------------------------------------------------------------------
+[ ] Each robot's head-cam server auto-starts on boot (systemd
+    g1-headcam.service). Verify: on the Jetson, `systemctl status
+    g1-headcam.service` = active (running). If a fresh robot grabs the
+    camera, disable Unitree's video_hub_pc4 in master_service (see notes).
+[ ] Fingertip force calibration — "🤏 Calibration" on EACH robot. This
+    persists (fingertip_force_calibration.json) and auto-loads, so do it
+    ONCE. Redo only if tactile readings look wrong or after a hand swap.
+[ ] (Optional) Wrench is verification-only — the raw torques are recorded
+    and wrench is computed offline, so a live tare ("⊘ Tare (empty)") is
+    NOT needed per participant. Tare only if you want the live arrows zeroed.
+[ ] Kneeling Pose ("🧎") + Arm Abduction Limit ("💪") — once per robot if
+    not already saved (they persist to JSON).
+[ ] Crate bundle calibrated on the MASTER — "🔧 Recalibrate Crate" (needs
+    the 2 external cameras; the head cam is NOT used for calibration).
+    The bundle auto-sends to the peer over the link (no scp needed).
+
+------------------------------------------------------------------------
+B. START OF A SESSION / PARTICIPANT GROUP
+------------------------------------------------------------------------
+[ ] Power on both robots + both control PCs. Table AprilTag (id 0) and the
+    crate (tags 1-10) in place; tag 0 clearly visible to every camera.
+[ ] TAG SIZES: tags 0 (table) and 10 (crate base) are 100 mm; the other crate
+    faces are 65 mm. This is handled automatically in software
+    (apriltag_crate_calibrate.TAG_SIZE_OVERRIDES) — do NOT change --table-tag-size /
+    --tag-size from 0.065 (the base), or the 65 mm faces get mis-sized.
+[ ] Aim each robot's ZED DOWNWARD ~60° at the workspace so table tag 0 (and the
+    crate) stay in its view — this is what the ZED localizer uses to place the
+    camera; a flatter angle means more pose gaps in the dataset.
+[ ] Launch the manager on BOTH machines (roles persist: one Master, one
+    Peer). Confirm the window title shows the right robot number.
+[ ] Link connects automatically — wait for "Peer: CONNECTED" (green) in
+    the Both-Robots panel. If not, check the Link IP / that one side listens.
+[ ] Video streaming ON ("📹 Video Streaming") on each robot.
+[ ] >>> Press "🚀 Prepare Study (Calibrate All)" on the MASTER. <<<
+    This one button, on BOTH robots at once:
+      - ensures head-cam base localization is running + locked on tag 0
+      - anchors the master's external crate cameras to tag 0
+      - pushes the crate bundle to the peer
+      - enables the peer's head-cam crate contribution + anchors its base
+[ ] ZED calibration: check the "ZED calib" light in the System Status panel is
+    GREEN on BOTH robots (green = SN<serial>.conf present → intrinsics auto-written
+    to meta). If a robot is RED, that machine has no ZED conf — plug its ZED in with
+    internet once (SDK auto-downloads it) or copy the SN conf to
+    /usr/local/zed/settings. The manager also logs this at startup + Prepare.
+[ ] Verify the status lines are GREEN before recording:
+      - Master: "Base: localized …", "Crate: tracked (N tag / M cam …)"
+      - Peer:   "Base: localized …", "Crate contribution: sending (… → master)"
+    If a line is orange/red, fix it (aim the head at tag 0; make sure tag 0
+    is visible to the crate cameras) and press Prepare again.
+[ ] Set the trial order — drag the conditions in "Trial order" to the
+    desired sequence (shared to both machines automatically).
+
+------------------------------------------------------------------------
+C. PER PARTICIPANT
+------------------------------------------------------------------------
+[ ] Enter the Participant ID.
+[ ] "● Start Recording" (or "Start Recording (BOTH)"). A pre-flight check
+    re-verifies the cameras first; fix or "Record anyway" if it warns.
+    Recording begins at the TOP of the trial ranking, attempt 1.
+[ ] Run the trial. Use "⏭ Next Attempt (BOTH)" between attempts and
+    "⏭ Next Trial (BOTH)" to advance conditions (follows the ranking).
+[ ] "■ Stop Recording" when done. On Stop, the PEER AUTOMATICALLY sends its
+    finished session to the master (merged into robot1/ + robot2/ per
+    attempt) — no button needed. Watch the peer's Log/"Sent to master ✓".
+    ("📤 Send Data to Master" stays as a manual re-send if a transfer fails.)
+
+------------------------------------------------------------------------
+D. WATCH DURING THE SESSION
+------------------------------------------------------------------------
+[ ] Latency Monitor — video + teleop latency reasonable.
+[ ] Crate "Δcam … mm" — if it jumps, a crate camera was bumped:
+    "🔧 Re-Anchor Bumped Cam" (works during recording; pick the moved cam).
+[ ] "Base: localized" stays green on both robots.
+[ ] If the peer's crate contribution drops out, re-press Prepare Study or
+    the peer's "🛰 Contribute Crate Tracking".
+
+------------------------------------------------------------------------
+E. RECOVERY
+------------------------------------------------------------------------
+- Something went wrong mid-take? Use REDO (both robots, in sync, while
+  recording): "🔄 Redo Attempt" discards THIS attempt's data and re-records
+  the same attempt; "🔄 Redo Trial" discards ALL attempts of the current
+  condition and restarts it at attempt 1. Both ask to confirm (they delete
+  data). No need to Stop/Start.
+- Peer head cam not reaching the manager: on its Jetson,
+  `systemctl status g1-headcam.service`; if a Unitree camera process holds
+  /dev/video4, stop videohub_pc4 (see the Jetson notes) and restart the
+  service.
+- Bumped external camera: "🔧 Re-Anchor Bumped Cam".
+- Bad/late crate calibration: "🔧 Recalibrate Crate" on the master (bundle
+  re-pushes to the peer automatically).
+- Emergency: "🛑 KILL / E-STOP" — CLICK TWICE within 1 s (the first click shows
+  "CLICK AGAIN to E-STOP"; it can't go off on a single stray click). Controlled
+  end-of-day: "🛡 Safe Shutdown" (asks to confirm first). Redo Attempt/Trial also
+  ask to confirm before deleting.
+
+------------------------------------------------------------------------
+F. END
+------------------------------------------------------------------------
+[ ] Confirm each session merged on the master (robot1/ + robot2/ present).
+[ ] Spot-check with "🧊 Open Digital Twin" on the master.
+[ ] Build the training dataset: "🧱 Build Dataset" on the master → pick the merged
+    session → it localizes the ZEDs (AprilTag), aligns both robots on the master clock,
+    resamples to 15 Hz, decodes images, and writes dataset.hdf5 + manifest (background;
+    watch the Log). Runs with --only-good (drops attempts you marked Bad).
+[ ] "🛡 Safe Shutdown" both robots.
+========================================================================

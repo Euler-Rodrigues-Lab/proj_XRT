@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "proj-xrt"
+version = "0.1.0"
+description = "Extended-Reality Teleoperation for Unitree G1 and Inspire tactile hands."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "g1-teleop",
+    "numpy<2",
+    "scipy",
+    "mujoco>=3",
+    "PyYAML",
+    "xr-robot-teleop-server",
+]
+
+[project.optional-dependencies]
+hardware = ["pymodbus", "pyserial", "dynamixel-sdk", "unitree-sdk2py"]
+study = [
+    "PyQt5",
+    "opencv-python",
+    "pupil-apriltags",
+    "pyrealsense2",
+]
+transcription = ["faster-whisper", "sounddevice", "speechbrain"]
+test = ["pytest"]
+
+[project.scripts]
+xrt-g1 = "projects.inspire_hand_teleop.demo_g1_inspire_xr_robot_teleop_full_body_hw:main"
+xrt-study = "projects.inspire_hand_teleop.XRT_user_study_manager:main"
+
+[tool.setuptools.packages.find]
+include = ["projects*"]
+
+[tool.setuptools.package-data]
+"projects.g1_full_body_kinematic" = ["config/*.yaml", "g1/meshes/*"]
+"projects.g1_upper_body_teleop" = ["*.yaml"]
+"projects.inspire_hand_teleop" = [
+    "*.json",
+    "*.md",
+    "*.service",
+    "*.txt",
+    "g1_with_inspire_hand/*.urdf",
+    "g1_with_inspire_hand/*.xml",
+    "twin_assets/*",
+]
+"projects.shared_devices" = ["*.sh"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.uv.sources]
+g1-teleop = { path = "external/g1_teleop", editable = true }

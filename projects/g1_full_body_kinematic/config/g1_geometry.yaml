@@ -1,0 +1,39 @@
+# XRT G1 SEW safety-filter geometry. All lengths are in metres.
+
+geometry:
+  torso_start: 0.43
+  torso_end: -0.1
+  torso_radius: 0.075
+
+  shoulder_radius: 0.075
+  upperarm_radius: 0.05
+  forearm_radius: 0.035
+  handarm_radius: 0.065
+
+  shoulder_height: 0.0
+  body_frame_origin: [0.0, 0.0, 0.0]
+
+
+# Two-part keep-out: the chest plus a vertical capsule protecting the
+# head-mounted Ostrich neck and ZED. The head capsule dimensions are the
+# study-tuned values from proj_xrt/inspire_hand_control_hw (2026-07-24).
+torso_primitive:
+  type: rounded_box_list
+  primitives:
+    - center: [0.0, 0.0, 0.15]
+      half_extents: [0.05, 0.08, 0.13]
+      rotation: [1, 0, 0, 0, 1, 0, 0, 0, 1]
+      r: 0.02
+    - type: capsule
+      a: [0.0, 0.0, 0.4266]
+      b: [0.0, 0.0, 0.4779]
+      r: 0.1728
+
+
+filter:
+  d_min: 0.02
+  d_act: 0.05
+  d_rel: 0.07
+
+
+pair_params: {}

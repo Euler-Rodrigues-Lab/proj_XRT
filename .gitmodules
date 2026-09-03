@@ -1,0 +1,3 @@
+[submodule "external/g1_teleop"]
+	path = external/g1_teleop
+	url = https://github.com/Euler-Rodrigues-Lab/g1_teleop.git
