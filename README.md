@@ -1,26 +1,53 @@
 # XRT — Extended-Reality Teleoperation
 
 XRT is the application and study layer for XR teleoperation of a Unitree G1 with
-Inspire tactile hands.  It was extracted from
-`SEW-Geometric-Teleop@proj_xrt/inspire_hand_control_hw` at commit `32bef869`.
+Inspire tactile hands, built on the shared G1 robot and XR device packages.
 
 Robot models, simulation controllers, arm/torso/hand retargeting, collision filtering,
 and the base G1 hardware interfaces are owned by the pinned `g1_teleop` submodule.
-This repository owns the live WebRTC/OpenXR device, the XRT study manager, tactile and
-haptic feedback, camera/localization tools, hardware safety extensions, recording, and
+XRT_devices owns WebRTC/OpenXR input, process isolation, transport telemetry, body-pose
+recording, and the optional ZED streaming launcher. This repository owns the study manager,
+tactile and haptic policy, camera/localization orchestration, hardware safety extensions, and
 digital-twin playback.  The compatibility modules under `projects/g1_*` are adapters,
 not a second copy of the retargeting implementation.
 
 ## Clone and install
 
+Use Python 3.10–3.12 (the study dependencies currently exclude Python 3.13).
+Clone recursively so uv can install the nested editable packages:
+
 ```bash
 git clone --recurse-submodules https://github.com/Euler-Rodrigues-Lab/proj_XRT.git
 cd proj_XRT
-python -m venv .venv
+uv sync --locked --python 3.12 --extra test
 source .venv/bin/activate
-python -m pip install -e external/g1_teleop
-python -m pip install -e '.[hardware,study]'
+python -m pytest -q
 ```
+
+For an existing checkout, initialize dependencies with
+`git submodule update --init --recursive` before syncing. Do not update over
+uncommitted changes inside a submodule.
+
+The command above installs the XR transport and public fallback/test dependencies
+for simulation. For the full hardware and study environment, use:
+
+```bash
+uv sync --locked --python 3.12 --extra hardware --extra study --extra test
+```
+
+Add `--extra transcription` if using speech transcription. This project's extra
+is named `hardware`, not G1's `hw`. Repeat the extras you need on every sync:
+`uv sync` removes packages outside the selected dependencies. `--inexact` preserves
+additional installed packages, but explicitly selecting extras is more reproducible.
+The Unitree SDK resolves from its public Git source. ZED SDK, GStreamer, MediaMTX
+and device/system drivers remain separate prerequisites; see the study preflight
+checklist. Installing dependencies does not itself start hardware, but the live
+application commands below require `--dry_run` to avoid hardware operation.
+
+The licensed solver wheel and license are supplied separately. Follow the
+[G1 provisioning instructions](external/g1_teleop/README.md#install) to register
+them, then run `geo-kin-provision install --product g1-inspire` from this project
+with its environment activated. Do not commit wheels or license files.
 
 The licensed Rust `geo_kin` wheel is selected automatically when installed.  Without
 it, `g1_teleop` falls back to its public backend.  Simulation-only and data-analysis
@@ -54,7 +81,7 @@ guide is maintained at <https://xr-robot-teleop-website.pages.dev/>.
 
 ```text
 external/g1_teleop/                 pinned G1 base (Git submodule)
-projects/shared_devices/            OpenXR/WebRTC capture + process proxy
+external/g1_teleop/external/XRT_devices/  shared input, feedback, recording, video
 projects/g1_upper_body_teleop/      XRT's study-specific DDS safety extensions
 projects/g1_full_body_kinematic/    legacy API adapters onto g1_teleop
 projects/inspire_hand_teleop/       manager, haptics, sensing, calibration, playback
@@ -71,3 +98,17 @@ passes it to the Python reference backend; licensed Rust wheels use their equiva
 compiled-in safety geometry, as required by that API. General G1 simulation, XR, and
 offline-replay entry points are supplied by `external/g1_teleop/g1_teleop/demos/`
 instead of retaining stale duplicate demos here.
+
+Study transport imports `StudyXRDevice` from `xrt_devices.study` or
+`WebRTCServerProxy` from `xrt_devices.study_process`. Both require explicit
+`start()` and `close()`. The proxy acknowledges server startup and recording
+changes; poses use a bounded latest-value mailbox. The Quest creates the
+`unity_cmds`, `haptics`, and `motor_stats` channels. Take recording is configured
+atomically with `configure_recording(...)`; shutdown drains the CSV writer.
+The ZED Bash launcher is resolved from the installed `xrt_devices.video` package;
+GStreamer, ZED SDK, NVIDIA encoding, and MediaMTX remain optional system tools.
+
+Local migration changes in the nested device checkout must be committed and
+published upstream, then the robot and application gitlinks updated, before a
+fresh remote clone contains the new study APIs. No live headset or hardware
+validation is implied by the offline/loopback tests.

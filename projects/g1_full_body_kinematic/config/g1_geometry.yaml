@@ -16,7 +16,7 @@ geometry:
 
 # Two-part keep-out: the chest plus a vertical capsule protecting the
 # head-mounted Ostrich neck and ZED. The head capsule dimensions are the
-# study-tuned values from proj_xrt/inspire_hand_control_hw (2026-07-24).
+# Study-tuned values (2026-07-24).
 torso_primitive:
   type: rounded_box_list
   primitives:

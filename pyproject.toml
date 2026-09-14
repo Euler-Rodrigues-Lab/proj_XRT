@@ -15,7 +15,7 @@ dependencies = [
     "scipy",
     "mujoco>=3",
     "PyYAML",
-    "xr-robot-teleop-server",
+    "xrt-devices[xr,recording]>=0.1.0",
 ]
 
 [project.optional-dependencies]
@@ -27,7 +27,7 @@ study = [
     "pyrealsense2",
 ]
 transcription = ["faster-whisper", "sounddevice", "speechbrain"]
-test = ["pytest"]
+test = ["pytest", "geo-kin-core[fallback]"]
 
 [project.scripts]
 xrt-g1 = "projects.inspire_hand_teleop.demo_g1_inspire_xr_robot_teleop_full_body_hw:main"
@@ -48,10 +48,13 @@ include = ["projects*"]
     "g1_with_inspire_hand/*.xml",
     "twin_assets/*",
 ]
-"projects.shared_devices" = ["*.sh"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
 [tool.uv.sources]
 g1-teleop = { path = "external/g1_teleop", editable = true }
+
+xrt-devices = { path = "external/g1_teleop/external/XRT_devices", editable = true }
+geo-kin-core = { path = "external/g1_teleop/external/geo_kin_core", editable = true }
+unitree-sdk2py = { git = "https://github.com/unitreerobotics/unitree_sdk2_python.git" }

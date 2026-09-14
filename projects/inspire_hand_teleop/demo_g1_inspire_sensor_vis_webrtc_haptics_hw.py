@@ -40,7 +40,7 @@ from projects.inspire_hand_teleop.inspire_hand_vis_utils import (
     refresh_dual_hand_plot_context,
     render_mujoco_sensor_overlay,
 )
-from projects.shared_devices.xr_robot_teleop_client import XRRTCBodyPoseDevice
+from xrt_devices.study import StudyXRDevice as XRRTCBodyPoseDevice
 
 # ── Copied helpers from sensor_vis demo (unchanged) ──────────────────────────
 
@@ -186,7 +186,7 @@ if __name__ == "__main__":
     # Using XRRTCBodyPoseDevice registers the body_pose and apriltag_pose
     # channels that the Quest app expects during its connection handshake.
     # env=None because we are not driving a simulation — passive sensor vis only.
-    xr_device = XRRTCBodyPoseDevice(env=None, server_data_channels=["haptics"])
+    xr_device = XRRTCBodyPoseDevice(env=None).start()
     logging.info("[WebRTC] Haptics + body-pose server started on port 8080.")
     logging.info("[WebRTC] Connect your Quest app — waiting for peer connection...")
 
@@ -386,6 +386,7 @@ if __name__ == "__main__":
             haptics_streamer.stop()
         except Exception:
             pass
+        xr_device.close()
         hand.stop()
 
     def _handle_sigint(_sig, _frame):

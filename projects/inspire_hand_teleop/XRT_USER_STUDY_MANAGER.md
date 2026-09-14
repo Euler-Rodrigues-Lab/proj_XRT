@@ -378,7 +378,7 @@ inside it.
 | `build_dataset.py` | Session → training-ready HDF5 |
 | `inspire_fingertip_force_calibration.py` | Tactile calibration model (baselines, noise floors, gram fits) |
 | `inspire_hand_haptics_streamer.py` | Live tactile → Quest haptics payloads |
-| `xr_robot_teleop_client.py` (shared_devices) | WebRTC device: pose intake, channels, body-pose CSV |
+| `xrt_devices.study` / `xrt_devices.study_process` | WebRTC device: pose intake, channels, body-pose CSV |
 
 ---
 

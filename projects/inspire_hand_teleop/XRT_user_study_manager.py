@@ -92,7 +92,9 @@ _URDF = _HERE / "g1_with_inspire_hand" / "g1_29dof_rev_1_0_with_inspire_hand_FTP
 _REPO_ROOT = _HERE.parent.parent
 _MEDIAMTX = _REPO_ROOT / "workspaces" / "mediamtx" / "mediamtx"
 _MEDIAMTX_CFG = _REPO_ROOT / "workspaces" / "mediamtx" / "mediamtx.yml"
-_ZED_SCRIPT = _REPO_ROOT / "projects" / "shared_devices" / "zed_to_mediamtx.sh"
+from xrt_devices.video import zed_stream_script
+
+_ZED_SCRIPT = zed_stream_script()
 
 sys.path.insert(0, str(_HERE))
 sys.path.insert(0, str(_HERE.parent / "g1_upper_body_teleop"))  # exposes common.common.*
@@ -6294,7 +6296,7 @@ class StudyManagerApp(QMainWindow):
         self._update_buttons()
 
     def _init_core(self):
-        from projects.shared_devices.xr_robot_teleop_client import XRRTCBodyPoseDevice
+        from xrt_devices.study import StudyXRDevice as XRRTCBodyPoseDevice
         from projects.inspire_hand_teleop.inspire_hand_haptics_streamer import InspireHandHapticsStreamer
         from projects.inspire_hand_teleop.motor_stats_streamer import MotorStatsStreamer
         from projects.g1_full_body_kinematic.g1_full_body_sew_solver import G1FullBodySEWSolver
@@ -6371,7 +6373,7 @@ class StudyManagerApp(QMainWindow):
             # Host the aiortc event loop in its OWN process so no amount of manager-side GIL
             # load (60 Hz IK+SEW, retargeting, CSV, Qt) can starve it → no RTT-balloon drops.
             # The proxy exposes the same surface the device does, so nothing else changes.
-            from projects.shared_devices.xr_webrtc_proxy import WebRTCServerProxy
+            from xrt_devices.study_process import WebRTCServerProxy
             self._device = WebRTCServerProxy(_dev_init, log_fn=self._log)
             try:
                 self._device.start()
@@ -6380,10 +6382,11 @@ class StudyManagerApp(QMainWindow):
             except Exception as exc:
                 self._log(f"Out-of-process WebRTC failed to start ({exc}); falling back to "
                           "in-process.")
-                self._device = XRRTCBodyPoseDevice(env=None, **_dev_init)
+                self._webrtc_subprocess = False
+                self._device = XRRTCBodyPoseDevice(env=None, **_dev_init).start()
                 self._log("WebRTC server started on port 8080.")
         else:
-            self._device = XRRTCBodyPoseDevice(env=None, **_dev_init)
+            self._device = XRRTCBodyPoseDevice(env=None, **_dev_init).start()
             self._log("WebRTC server started on port 8080.")
 
         # Solver
@@ -8520,8 +8523,7 @@ class StudyManagerApp(QMainWindow):
         if not getattr(self, "_webrtc_subprocess", False):
             return
         dev = getattr(self, "_device", None)
-        proc = getattr(dev, "_proc", None) if dev is not None else None
-        if proc is None or proc.poll() is None:           # no subprocess, or still alive
+        if dev is None or getattr(dev, "worker_alive", True):
             return
         now = time.monotonic()
         if (self._recording_active or self._webrtc_reboot_inflight
@@ -8534,32 +8536,27 @@ class StudyManagerApp(QMainWindow):
         threading.Thread(target=self._reboot_webrtc_bg, daemon=True).start()
 
     def _reboot_webrtc_bg(self):
-        """Background: bring up a FRESH out-of-process WebRTC server, then atomically swap the
-        device everywhere it's referenced (manager, control thread, haptics streamer) so pose
-        reads + haptics sends target the new server, and stop the old one."""
+        """Release the listening port, start a new server, and replace consumer references."""
         try:
-            from projects.shared_devices.xr_webrtc_proxy import WebRTCServerProxy
+            from xrt_devices.study_process import WebRTCServerProxy
+            old = self._device
+            if old is not None:
+                old.stop()
             new = WebRTCServerProxy(self._webrtc_dev_init, log_fn=self._log)
             new.start()
         except Exception as exc:                          # noqa: BLE001
             self._webrtc_reboot_inflight = False
-            self._log(f"[webrtc] reboot FAILED to start a fresh server ({exc}); the old one is "
-                      "left running. Restart the manager if WebRTC stays wedged.")
+            self._log(f"[webrtc] reboot failed ({exc}). Restart the manager if WebRTC stays unavailable.")
             return
-        old = self._device
-        # Atomic reference swaps (each is a single attribute write). A consumer mid-read sees the
-        # OLD (being-stopped) server → get_controller_state()/send_haptics() just no-op, then the
-        # next tick sees the NEW one.
+        # Each consumer sees either the stopped device or the new one.
+        # The stopped device reports no fresh pose.
         self._device = new
         if self._control_thread is not None:
             self._control_thread._device = new
         if self._haptics_streamer is not None:
             self._haptics_streamer._device = new
-        try:
-            if old is not None:
-                old.stop()
-        except Exception:                                 # noqa: BLE001
-            pass
+        if self._motor_stats_streamer is not None:
+            self._motor_stats_streamer._device = new
         self._webrtc_reboot_inflight = False
         self._log("[webrtc] WebRTC server rebooted — fresh haptics/pose channels; waiting for the "
                   "Quest to reconnect.")
@@ -9742,11 +9739,8 @@ class StudyManagerApp(QMainWindow):
 
         # Operator XR body pose CSV (the device writes it + csv_start_time.txt).
         if self._device is not None:
-            self._device.output_dir = rec_dir
-            self._device.record_data = True
-            if not hasattr(self._device, 'started'):
-                self._device.started = False
-            self._device.started = False
+            self._device.configure_recording(
+                output_dir=rec_dir, record_data=True, started=False)
 
         mass_g = self._wrench_mass_spin.value()
         wrench_baseline = (self._wrench_worker.baseline_dict()
@@ -11429,8 +11423,8 @@ class StudyManagerApp(QMainWindow):
         STREAMING pipeline UP so recording can be reopened in the next subfolder without
         a camera restart. Shared by Stop and by each trial/attempt rotate."""
         if self._device is not None and getattr(self._device, 'record_data', False):
-            self._device.cleanup_recording()
-            self._device.record_data = False
+            self._device.configure_recording(
+                output_dir=self._device.output_dir, record_data=False, started=False)
 
         # Persist the final known mass + tare baseline, then finalize the raw CSV.
         mass_g = self._wrench_mass_spin.value()

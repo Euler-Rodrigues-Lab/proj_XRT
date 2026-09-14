@@ -24,7 +24,7 @@ import mujoco
 import mujoco.viewer
 import numpy as np
 
-from projects.shared_devices.xr_robot_teleop_client import XRRTCBodyPoseDevice
+from xrt_devices.study import StudyXRDevice as XRRTCBodyPoseDevice
 from projects.inspire_hand_teleop.inspire_hand_haptics_streamer import InspireHandHapticsStreamer
 from projects.inspire_hand_teleop.motor_stats_streamer import MotorStatsStreamer
 # Add current directory to Python path for local imports
@@ -280,17 +280,14 @@ def main():
     print("Initializing teleoperation system...")
     try:
         _server_channels = []
-        if not args.no_haptics:
-            _server_channels.append("haptics")
-        if not args.no_motor_stats:
-            _server_channels.append("motor_stats")
+        # Feedback channels are created by the Quest client.
         device = XRRTCBodyPoseDevice(
             env=None,
             record_data=args.record_data,
             output_dir=args.output_dir,
             ndigits=args.ndigits,
             server_data_channels=_server_channels,
-        )
+        ).start()
         
         # Initialize Solver
         solver_kwargs = {
@@ -603,7 +600,7 @@ def main():
     if 'motor_stats_streamer' in dir() and motor_stats_streamer is not None:
         motor_stats_streamer.stop()
     if args.record_data:
-        device.cleanup_recording()
+        device.close()
 
     if neck_interface is not None:
         neck_interface.shutdown()
