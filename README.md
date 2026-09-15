@@ -44,6 +44,18 @@ and device/system drivers remain separate prerequisites; see the study preflight
 checklist. Installing dependencies does not itself start hardware, but the live
 application commands below require `--dry_run` to avoid hardware operation.
 
+If hardware sync fails with `Could not locate cyclonedds`, install the native
+Cyclone DDS library first, then export `CYCLONEDDS_HOME` to its installation
+prefix and repeat the sync. Unitree pins the Python binding to version 0.10.2;
+its [official installation FAQ](https://github.com/unitreerobotics/unitree_sdk2_python#faq)
+documents building the compatible `releases/0.10.x` native library with CMake.
+This native prerequisite is not installed by uv. For an existing native install:
+
+```bash
+export CYCLONEDDS_HOME=/absolute/path/to/cyclonedds/install
+uv sync --locked --python 3.12 --extra hardware --extra study --extra test
+```
+
 The licensed solver wheel and license are supplied separately. Follow the
 [G1 provisioning instructions](external/g1_teleop/README.md#install) to register
 them, then run `geo-kin-provision install --product g1-inspire` from this project
