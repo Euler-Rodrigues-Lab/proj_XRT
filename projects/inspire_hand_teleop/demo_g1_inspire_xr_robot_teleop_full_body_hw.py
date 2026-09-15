@@ -30,7 +30,7 @@ from projects.inspire_hand_teleop.motor_stats_streamer import MotorStatsStreamer
 # Add current directory to Python path for local imports
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from projects.g1_full_body_kinematic.g1_full_body_sew_solver import G1FullBodySEWSolver
+from proj_xrt.g1_adapter import G1FullBodySEWSolver
 from projects.inspire_hand_teleop.g1_with_inspire_hand_mujoco_controller import G1InspireHandMuJoCoController
 from projects.inspire_hand_teleop.inspire_hand_hw_controller import InspireHandController
 from geo_kin_core.viz import draw_filtered_sew

@@ -91,8 +91,18 @@ guide is maintained at <https://xr-robot-teleop-website.pages.dev/>.
 
 ## Source layout
 
+`proj_xrt` is the application API: lazy CLI entry points and the study-to-G1
+typed-frame adapter. It does not implement robot IK or simulation controllers.
+`projects/g1_*` remains a compatibility namespace for saved scripts; its solver
+module re-exports `proj_xrt.g1_adapter`, and controller modules re-export G1.
+Study-specific assets and safety policy remain application-owned. The large study
+manager and its relative-path resources stay under `projects/inspire_hand_teleop`
+for now; moving these requires a separate resource-path and live-study regression
+pass, not duplicating them into the G1 dependency.
+
 ```text
 external/g1_teleop/                 pinned G1 base (Git submodule)
+proj_xrt/                          application CLI and G1 API adapter
 external/g1_teleop/external/XRT_devices/  shared input, feedback, recording, video
 projects/g1_upper_body_teleop/      XRT's study-specific DDS safety extensions
 projects/g1_full_body_kinematic/    legacy API adapters onto g1_teleop

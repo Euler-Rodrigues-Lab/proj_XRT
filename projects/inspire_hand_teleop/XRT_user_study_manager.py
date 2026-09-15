@@ -6299,7 +6299,7 @@ class StudyManagerApp(QMainWindow):
         from xrt_devices.study import StudyXRDevice as XRRTCBodyPoseDevice
         from projects.inspire_hand_teleop.inspire_hand_haptics_streamer import InspireHandHapticsStreamer
         from projects.inspire_hand_teleop.motor_stats_streamer import MotorStatsStreamer
-        from projects.g1_full_body_kinematic.g1_full_body_sew_solver import G1FullBodySEWSolver
+        from proj_xrt.g1_adapter import G1FullBodySEWSolver
         from projects.inspire_hand_teleop.g1_with_inspire_hand_mujoco_controller import G1InspireHandMuJoCoController
         from projects.inspire_hand_teleop.inspire_hand_hw_controller import InspireHandController
         from projects.g1_upper_body_teleop.config import Config

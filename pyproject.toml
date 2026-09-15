@@ -30,11 +30,11 @@ transcription = ["faster-whisper", "sounddevice", "speechbrain"]
 test = ["pytest", "geo-kin-core[fallback]"]
 
 [project.scripts]
-xrt-g1 = "projects.inspire_hand_teleop.demo_g1_inspire_xr_robot_teleop_full_body_hw:main"
-xrt-study = "projects.inspire_hand_teleop.XRT_user_study_manager:main"
+xrt-g1 = "proj_xrt.cli:teleop"
+xrt-study = "proj_xrt.cli:study"
 
 [tool.setuptools.packages.find]
-include = ["projects*"]
+include = ["proj_xrt*", "projects*"]
 
 [tool.setuptools.package-data]
 "projects.g1_full_body_kinematic" = ["config/*.yaml", "g1/meshes/*"]
