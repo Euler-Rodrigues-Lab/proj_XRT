@@ -32,6 +32,8 @@ _COMPAT_XML = (
     / "g1_29dof_rev_1_0_with_inspire_hand_FTP.xml"
 )
 _DEFAULT_GEOMETRY_CONFIG = _PROJECTS / "g1_full_body_kinematic" / "config" / "g1_geometry.yaml"
+# Study-tuned keep-out (chest box + head/ZED capsule) used by dual-operator study mode.
+STUDY_GEOMETRY_CONFIG = _DEFAULT_GEOMETRY_CONFIG
 
 
 class _PreparedAction(dict):
@@ -67,6 +69,7 @@ class G1FullBodySEWSolver:
         hand_type="psyonic",
         base_alignment_mode="mocap",
         geometry_config_path=_DEFAULT_GEOMETRY_CONFIG,
+        wrist_rate_limit=True,
     ):
         # ``debug`` and ``timing_enabled`` belonged to the monolith wrapper and
         # are intentionally not forwarded: they are not part of the stable
@@ -90,6 +93,14 @@ class G1FullBodySEWSolver:
         if geometry_config_path is not None:
             self._session_config["geometry_config_path"] = geometry_config_path
         self.hand_type = hand_type
+        # Near a singular arm configuration the wrist joints can snap between
+        # equivalent IK solutions in one solve, flipping the hand ~180 degrees.
+        # Cap each wrist joint at 30 rad/s, well above real wrist motion, so
+        # only that one-frame jump is ramped out.  None disables the cap.
+        self._control_rate_hz = float(control_rate_hz)
+        self._wrist_max_step_rad = None
+        self.set_wrist_rate_limit(wrist_rate_limit)
+        self._q_prev = {"right": None, "left": None}
         self.geometry_source = None
         self._session = self._resolve_session()
         self.last_filtered_sew = None
@@ -162,9 +173,52 @@ class G1FullBodySEWSolver:
         )
         diag = getattr(output, "diag", None)
         self.last_filtered_sew = getattr(diag, "filtered_sew", None)
-        return _output_dict(output)
+        goals = _output_dict(output)
+        for side in ("right", "left"):
+            key = f"q_goal_{side}"
+            if goals[key] is not None:
+                goals[key] = self._limit_wrist_step(side, goals[key])
+        return goals
+
+    def set_wrist_rate_limit(self, enabled):
+        """Enable or disable the 30 rad/s wrist cap; takes effect on the next solve."""
+        self._wrist_max_step_rad = (
+            30.0 / max(self._control_rate_hz, 1.0) if enabled else None
+        )
+
+    @property
+    def wrist_rate_limit(self):
+        return self._wrist_max_step_rad is not None
+
+    def set_geometry_config(self, geometry_config_path):
+        """Switch the safety-filter geometry YAML (None = backend default) and rebuild.
+
+        The licensed wheel compiles its geometry in and ignores this; the reference
+        and fallback backends load the YAML.
+        """
+        if geometry_config_path is None:
+            self._session_config.pop("geometry_config_path", None)
+        else:
+            self._session_config["geometry_config_path"] = geometry_config_path
+        self.geometry_source = None
+        self._session = self._resolve_session()
+
+    def _limit_wrist_step(self, side, q_goal):
+        """Rate-limit wrist roll/pitch/yaw (indices 4-6) against the last goal."""
+        q_goal = np.array(q_goal, dtype=float)
+        prev = self._q_prev[side]
+        step = self._wrist_max_step_rad
+        if prev is not None and step is not None and len(q_goal) >= 7 and len(prev) >= 7:
+            # Raw difference: these joints are limited to less than +/-pi and do not wrap.
+            q_goal[4:7] = prev[4:7] + np.clip(q_goal[4:7] - prev[4:7], -step, step)
+        self._q_prev[side] = q_goal.copy()
+        return q_goal
 
     def reset(self, q_init_right=None, q_init_left=None, **_unused):
+        self._q_prev = {
+            "right": None if q_init_right is None else np.array(q_init_right, dtype=float),
+            "left": None if q_init_left is None else np.array(q_init_left, dtype=float),
+        }
         return self._session.reset(q_init_right=q_init_right, q_init_left=q_init_left)
 
     def sew_capsules(self):

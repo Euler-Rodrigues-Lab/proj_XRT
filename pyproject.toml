@@ -34,7 +34,7 @@ xrt-g1 = "proj_xrt.cli:teleop"
 xrt-study = "proj_xrt.cli:study"
 
 [tool.setuptools.packages.find]
-include = ["proj_xrt*", "projects*"]
+include = ["proj_xrt*", "projects*", "ostrich_neck*"]
 
 [tool.setuptools.package-data]
 "projects.g1_full_body_kinematic" = ["config/*.yaml", "g1/meshes/*"]

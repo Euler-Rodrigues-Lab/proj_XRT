@@ -12,6 +12,12 @@ The recorded data trains a **centralized diffusion policy** for the cooperative
 manipulation task; every stream is raw + timestamped so the whole workspace can be
 reconstructed offline.
 
+> **Study mode must be selected.** The manager opens in single-operator mode by
+> default, which hides every study tool and starts none of the study services. On each
+> study laptop, click **👤 Single Operator** at the top of the window to switch to
+> **👥 Dual-Operator Study** (or launch with `--operator-mode study`). The choice is
+> remembered in `~/.xrt_study_config.json`. Study mode always uses the kneeling stance.
+
 Companion docs: `APRILTAG_STUDY_SETUP.md` (camera / Jetson / NTP setup),
 `STUDY_PREFLIGHT_CHECKLIST.txt` (operating checklist), `twin_assets/README.md`
 (table/crate CAD alignment).

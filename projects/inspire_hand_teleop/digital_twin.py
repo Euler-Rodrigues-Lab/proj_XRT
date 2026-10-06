@@ -32,6 +32,14 @@ Pass EITHER robot's attempt folder (or its session root / a robot_raw CSV) — t
 matching folder for the other robot is auto-found by participant id + the same
 {condition}/attempt{K} subpath.
 
+SOLO takes (the manager's single-operator "Start Recording") play too: ONE robot, no
+partner, no head-cam base localization, no crate, no video::
+
+    {output_dir}/solo_{date}_{time}/solo/attempt{K}/robot{N}/…   (meta "solo": true)
+
+The robot stands at the world origin; the table / crate are drawn only if that take
+actually holds crate data.
+
 Controls (focus the OpenCV window):
   seek bar (drag/click, YouTube-style)   space = play/pause
   a / d = -5s / +5s    A / D = -30s / +30s    , / . = slower / faster
@@ -247,6 +255,14 @@ def _label_for(rec_dir: Path):
     return pid, f"{cond.name}/{attempt.name}"
 
 
+def is_solo(sessions: dict) -> bool:
+    """True for a single-operator SOLO take: every robot's meta is marked ``solo`` (written by
+    the manager's single-operator Start Recording). Such takes hold one robot and no partner /
+    base-localization / crate / video data, so their absence is expected, not an error."""
+    return bool(sessions) and all(bool(s.get("meta", {}).get("solo"))
+                                  for s in sessions.values())
+
+
 def gather_sessions(path: str) -> dict:
     """Map robot_id -> session dict (from session_viewer.find_session) for every robot
     whose data is present for this trial/attempt. Handles the merged robot{N}/ layout and
@@ -269,7 +285,11 @@ def gather_sessions(path: str) -> dict:
             print(f"[twin] robot{n}: skipping {d} ({exc})")
     if not sessions:
         raise FileNotFoundError(f"no robot_raw*.csv found for {path}")
-    if len(sessions) == 1:
+    if is_solo(sessions):
+        only = next(iter(sessions))
+        print(f"[twin] SOLO take (single-operator recording): robot{only} only — no partner "
+              "robot, base localization, crate or video expected.")
+    elif len(sessions) == 1:
         only = next(iter(sessions))
         missing = 2 if only == 1 else 1
         attempt = Path(next(iter(rec_dirs.values()))).parent
@@ -357,8 +377,11 @@ def _add_static_mesh(mujoco, parent, name, path, scale, pos, rgba, quat=(1, 0, 0
 def build_twin_model(mujoco, model_path, base_T, table_pos, table_half,
                      table_mesh=None, crate_mesh=None, table_scale=1.0,
                      crate_scale=1.0, table_z_down=True,
-                     table_offset=(0, 0, 0), table_rot=(0, 0, 0), floor=True):
+                     table_offset=(0, 0, 0), table_rot=(0, 0, 0), floor=True,
+                     table=True):
     """Compose floor + table + (optional) crate mesh + one prefixed G1 per robot.
+    ``table=False`` (solo takes with no crate data) omits the table entirely and puts the
+    floor at the robots' own ground level.
     base_T maps robot_id -> T_world_base (or None → unlocalized, placed with a warning).
     If ``table_mesh`` / ``crate_mesh`` (STL paths) are given they replace the box
     placeholders — the STL origin must be at table tag 0 (table) / crate tag 10 (crate).
@@ -380,7 +403,9 @@ def build_twin_model(mujoco, model_path, base_T, table_pos, table_half,
     # in the tag-0 frame (Z into the table); the twin world is Z-up, so flip it 180° about
     # X (world_from_table) when the rig ran with --table-z-down (the default).
     table_pos = np.asarray(table_pos, dtype=np.float64) + np.asarray(table_offset, float)
-    if table_mesh:
+    if not table:
+        pass                                             # solo take: no table in the scene
+    elif table_mesh:
         # world-frame nudge: (manual rot) ∘ (Z-down→Z-up flip), about the table origin.
         flip_R = np.diag([1.0, -1.0, -1.0]) if table_z_down else np.eye(3)
         table_quat = _mat_to_quat_wxyz(_rpy_to_mat(table_rot) @ flip_R)
@@ -431,8 +456,12 @@ def build_twin_model(mujoco, model_path, base_T, table_pos, table_half,
             # Unlocalized: sit at default pelvis height, offset so robots don't overlap.
             Twb = _make_T(np.eye(3), [fallback_i * 1.4, 0.0, float(T_cw_pelvis[2, 3])])
             fallback_i += 1
-            print(f"[twin] robot{n}: NO base localization — placing at a default "
-                  f"offset (its table placement is NOT reconstructed).")
+            if table:
+                print(f"[twin] robot{n}: NO base localization — placing at a default "
+                      f"offset (its table placement is NOT reconstructed).")
+            else:
+                print(f"[twin] robot{n}: no table/base data — robot placed at the world "
+                      f"origin (pos={np.round(Twb[:3, 3], 3).tolist()}).")
         Tframe = Twb @ _inv_T(T_cw_pelvis)           # pelvis lands on Twb
         child = mujoco.MjSpec.from_file(model_path)
         # The robot XML carries its own INFINITE ground plane ('floor'). Attached under
@@ -453,7 +482,7 @@ def build_twin_model(mujoco, model_path, base_T, table_pos, table_half,
     # the lowest. Falls back to 75 cm below the table when nothing is localized.
     if floor:
         floor_z = min([T[2, 3] for T in frame_T.values()] or [-0.75])
-        if abs(floor_z) < 1e-6:
+        if abs(floor_z) < 1e-6 and table:
             floor_z = -0.75              # unlocalized fallback frames sit at z≈0
         parent.worldbody.add_geom(
             type=mujoco.mjtGeom.mjGEOM_PLANE, size=[6.0, 6.0, 0.1],
@@ -853,6 +882,9 @@ def gather_trial(path, dm_min=15.0, upright_min=0.7):
         if rid in canonical:
             print(f"[twin] robot{rid}: canonical base from {source[rid]}  "
                   f"pos={np.round(canonical[rid][:3, 3], 3).tolist()}")
+        elif all(is_solo(sel["sessions"]) for sel in selections if rid in sel["sessions"]):
+            print(f"[twin] robot{rid}: solo take(s) — no base localization recorded; the "
+                  "robot is shown at the world origin.")
         else:
             print(f"[twin] robot{rid}: NO base localized in ANY attempt — it will float "
                   "(no head_base_*.csv anywhere).")
@@ -1036,7 +1068,8 @@ def run(selections, canonical_base, base_source, args, external_base=None):
             cv2.putText(canvas, label, (tx0, ty0 + TH + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
                         (255, 255, 255) if active else (200, 200, 200), 1)
             missing = [r for r in all_rids if r in selections[idx]["sessions"]
-                       and r not in base_ok[idx]]
+                       and r not in base_ok[idx]
+                       and not is_solo(selections[idx]["sessions"])]
             if missing:
                 cv2.putText(canvas, f"base borrowed (r{','.join(map(str, missing))})",
                             (tx0, ty0 + TH + 36), cv2.FONT_HERSHEY_SIMPLEX, 0.4,
@@ -1137,16 +1170,29 @@ def run(selections, canonical_base, base_source, args, external_base=None):
             except Exception as exc:                      # noqa: BLE001
                 print(f"[twin] seek bar unavailable ({exc}) — a/d/A/D scrubbing still works.")
 
+        # SOLO take (single-operator recording): one robot, no table/crate unless this take
+        # actually holds crate data. Study attempts keep the full table + crate scene.
+        solo = is_solo(sessions)
+        solo_scene = solo and not any(s.get("crate_csv") for s in sessions.values())
+        if solo:
+            print("[twin] solo take — " + ("no crate data, so the table + crate are omitted; "
+                                           "the robot stands at the world origin."
+                                           if solo_scene else
+                                           "crate data present, so the table + crate are shown."))
+
+        t_mesh = None if solo_scene else table_mesh
+        c_mesh = None if solo_scene else crate_mesh
+
         while True:                                       # base-fix rebuild loop
             base_T = {rid: (base_override[rid] if rid in base_override
                             else canonical_base.get(rid)) for rid in all_rids}
             model, prefixes, frame_T, crate_qadr = build_twin_model(
                 mujoco, model_path, base_T, table_pos, table_half,
-                table_mesh=table_mesh, crate_mesh=crate_mesh,
+                table_mesh=t_mesh, crate_mesh=c_mesh,
                 table_scale=args.table_stl_scale, crate_scale=args.crate_stl_scale,
                 table_z_down=args.table_z_down,
                 table_offset=args.table_offset, table_rot=args.table_rot,
-                floor=not args.no_floor)
+                floor=not args.no_floor, table=not solo_scene)
             data = mujoco.MjData(model)
 
             def _mesh_geom_ids():
@@ -1155,9 +1201,9 @@ def run(selections, canonical_base, base_source, args, external_base=None):
                     if model.geom_type[gi] != mujoco.mjtGeom.mjGEOM_MESH:
                         continue
                     bid = int(model.geom_bodyid[gi])
-                    if bid == 0 and table_mesh:
+                    if bid == 0 and t_mesh:
                         tg = gi
-                    elif crate_mesh and model.body(bid).name == "twin_crate":
+                    elif c_mesh and model.body(bid).name == "twin_crate":
                         cg = gi
                 return tg, cg
 

@@ -92,3 +92,73 @@ def test_solver_facade_runs_submodule_retargeting_and_safety_fk():
     palm = solver.arm_wrist_position("left", np.zeros(7))
     assert palm.shape == (3,)
     assert np.isfinite(palm).all()
+
+
+def test_solver_facade_rate_limits_wrist_flips(monkeypatch):
+    from geo_kin_core.types import RetargetOutput
+    import proj_xrt.g1_adapter as adapter
+
+    class StubSession:
+        def __init__(self):
+            self.goals = []
+
+        def solve(self, frame, **_kwargs):
+            q = self.goals.pop(0)
+            return RetargetOutput(q_goal_right=q.copy(), q_goal_left=q.copy())
+
+        def reset(self, **_kwargs):
+            pass
+
+    session = StubSession()
+    monkeypatch.setattr(adapter, "resolve_session", lambda **_kwargs: session)
+    solver = adapter.G1FullBodySEWSolver(hand_type="inspire", control_rate_hz=100.0)
+    cap = 30.0 / 100.0
+
+    start = np.array([0.3, -0.2, 0.1, 0.8, 0.0, 0.0, 0.0])
+    flipped = start.copy()
+    flipped[3:] = [1.0, 1.2, -0.6, 3.0]
+    session.goals = [start, flipped, flipped]
+    solver.reset(q_init_right=start, q_init_left=start)
+
+    assert np.allclose(solver.solve(None)["q_goal_right"], start)
+    goals = solver.solve(None)
+    for side in ("right", "left"):
+        q = goals[f"q_goal_{side}"]
+        assert q[3] == 1.0  # non-wrist joints pass through unchanged
+        assert np.allclose(q[4:], [cap, -cap, cap])
+    assert np.allclose(solver.solve(None)["q_goal_right"][4:], [2 * cap, -0.6, 2 * cap])
+
+
+def test_solver_facade_wrist_limit_and_geometry_toggles(monkeypatch):
+    from geo_kin_core.types import RetargetOutput
+    import proj_xrt.g1_adapter as adapter
+
+    configs = []
+
+    class StubSession:
+        def solve(self, frame, **_kwargs):
+            return RetargetOutput(q_goal_right=np.full(7, 2.0), q_goal_left=None)
+
+        def reset(self, **_kwargs):
+            pass
+
+    def resolve(**config):
+        configs.append(config)
+        return StubSession()
+
+    monkeypatch.setattr(adapter, "resolve_session", resolve)
+    solver = adapter.G1FullBodySEWSolver(
+        hand_type="inspire", control_rate_hz=100.0, wrist_rate_limit=False)
+    assert not solver.wrist_rate_limit
+    solver.reset(q_init_right=np.zeros(7))
+    assert np.allclose(solver.solve(None)["q_goal_right"], 2.0)
+
+    solver.set_wrist_rate_limit(True)
+    assert solver.wrist_rate_limit
+    assert np.allclose(solver.solve(None)["q_goal_right"][4:], 2.0)  # prev was already 2.0
+
+    assert configs[-1]["geometry_config_path"] == adapter.STUDY_GEOMETRY_CONFIG
+    solver.set_geometry_config(None)
+    assert "geometry_config_path" not in configs[-1]
+    solver.set_geometry_config(adapter.STUDY_GEOMETRY_CONFIG)
+    assert configs[-1]["geometry_config_path"] == adapter.STUDY_GEOMETRY_CONFIG

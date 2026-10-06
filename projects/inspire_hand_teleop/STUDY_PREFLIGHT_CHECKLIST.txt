@@ -39,6 +39,9 @@ B. START OF A SESSION / PARTICIPANT GROUP
     camera; a flatter angle means more pose gaps in the dataset.
 [ ] Launch the manager on BOTH machines (roles persist: one Master, one
     Peer). Confirm the window title shows the right robot number.
+[ ] Top-left button reads "👥 Dual-Operator Study" on BOTH machines. If it
+    reads "👤 Single Operator", click it and confirm (study tools and the
+    link only appear in study mode).
 [ ] Link connects automatically — wait for "Peer: CONNECTED" (green) in
     the Both-Robots panel. If not, check the Link IP / that one side listens.
 [ ] Video streaming ON ("📹 Video Streaming") on each robot.

@@ -112,6 +112,22 @@ _KNEELING_ANGLES = np.array([
     _HIP_PITCH_KNEEL, 0.0, 0.0, np.pi / 2 - _HIP_PITCH_KNEEL, _ANKLE_PITCH_KNEEL, 0.0,
 ])
 
+
+def _leg_gain_scales(args):
+    """(leg_kp, leg_kd, ankle_kp, ankle_kd) gain scales for the HELD legs, per stance.
+
+    Kneeling: the boosted --leg_kp_scale/--leg_kd_scale hip/knee gains carry the whole
+    body rigidly in the kneel, and the ankles are limp (kp=0) because the shins/feet rest
+    flat on the floor — a stiff ankle would only fight the floor contact.
+    Standing (gantry): the legs carry NO body weight (the gantry does), so Unitree's stock
+    g1.yaml gains — what g1_teleop's own --hw demo / move_to_default_pos() holds the standing
+    pose with — are enough and run cooler; the ankles keep their stock gain so the feet
+    hold the default pitch instead of flopping."""
+    if getattr(args, "kneeling", False):
+        return args.leg_kp_scale, args.leg_kd_scale, 0.0, 1.0
+    return 1.0, 1.0, 1.0, 1.0
+
+
 # Indices into the 12-element leg ordering (leg_joint2motor_idx / _KNEELING_ANGLES,
 # per leg [hip_pitch, hip_roll, hip_yaw, knee, ankle_pitch, ankle_roll]) selecting
 # the joints recorded "down to the knees": hip(3) + knee per leg, 8 total (no ankles).
@@ -1112,32 +1128,42 @@ class SessionRecorder:
 
     def capture(self, q_goal_torso=None, q_goal_left=None, q_goal_right=None,
                 q_goal_legs=None, finger_left=None, finger_right=None,
-                snapshot=None):
+                snapshot=None, sim_q=None):
         """Queue one raw frame. All args optional; missing data is written as 0.
 
         Records legs-down-to-the-knees + torso + both arms. ``q_goal_legs`` is the
         8-element hip+knee goal; ``finger_left``/``finger_right`` are the sim's
-        coupled finger qpos (12); ``snapshot`` is ``hand_controller.read()``."""
-        if not self._active or self._hw is None:
-            return
-        try:
-            ms = self._hw.low_state.motor_state
+        coupled finger qpos (12); ``snapshot`` is ``hand_controller.read()``.
 
-            def _temp(i):
-                t = ms[i].temperature
-                try:
-                    return float(max(t))   # HG int16[2]: hotter of motor/driver
-                except TypeError:
-                    return float(t)         # Go scalar
-
-            idx_map = {
-                "legs":  self._leg_idx,
-                "torso": list(self._hw._torso_idx),
-                "left":  list(self._hw._left_idx),
-                "right": list(self._hw._right_idx),
-            }
-        except Exception:
+        ``sim_q`` ({segment: joint angles}) is a fallback used ONLY when there is no
+        hardware (``--dry_run`` / robot not booted): the frame's ``q_*`` columns come from
+        the sim and dq/ddq/tau/temp are 0. Without it (the study) a hw-less frame is
+        dropped, exactly as before."""
+        if not self._active:
             return
+        if self._hw is None:
+            if sim_q is None:
+                return
+            ms, idx_map = None, {}
+        else:
+            try:
+                ms = self._hw.low_state.motor_state
+
+                def _temp(i):
+                    t = ms[i].temperature
+                    try:
+                        return float(max(t))   # HG int16[2]: hotter of motor/driver
+                    except TypeError:
+                        return float(t)         # Go scalar
+
+                idx_map = {
+                    "legs":  self._leg_idx,
+                    "torso": list(self._hw._torso_idx),
+                    "left":  list(self._hw._left_idx),
+                    "right": list(self._hw._right_idx),
+                }
+            except Exception:
+                return
 
         goal_map = {"legs": q_goal_legs, "torso": q_goal_torso,
                     "left": q_goal_left, "right": q_goal_right}
@@ -1157,6 +1183,10 @@ class SessionRecorder:
                 else:
                     for fld in ("q", "dq", "ddq", "tau", "temp"):
                         row[f"{fld}_{seg}_{j}"] = 0.0
+                    if ms is None:                 # no hw: sim fallback for q only
+                        sq = sim_q.get(seg)
+                        if sq is not None and j < len(sq):
+                            row[f"q_{seg}_{j}"] = round(float(sq[j]), 5)
                 row[f"qgoal_{seg}_{j}"] = (round(float(goal[j]), 5)
                                           if goal is not None and j < len(goal) else 0.0)
 
@@ -2765,6 +2795,7 @@ class ControlThread(threading.Thread):
             arm_damping, arm_damp_blend = True, float(self._eco_blend)
         else:
             arm_damping, arm_damp_blend = False, 0.0
+        leg_kp, leg_kd, ankle_kp, ankle_kd = _leg_gain_scales(self._args)
         try:
             self._hw_controller.send_upper_body_targets(
                 q_goal_torso=q_t,
@@ -2773,10 +2804,10 @@ class ControlThread(threading.Thread):
                 q_goal_legs=legs_cmd,
                 kp_scale=self._args.hw_kp_scale,
                 kd_scale=self._args.hw_kd_scale,
-                leg_kp_scale=self._args.leg_kp_scale,
-                leg_kd_scale=self._args.leg_kd_scale,
-                ankle_kp_scale=0.0,
-                ankle_kd_scale=1.0,
+                leg_kp_scale=leg_kp,
+                leg_kd_scale=leg_kd,
+                ankle_kp_scale=ankle_kp,
+                ankle_kd_scale=ankle_kd,
                 arm_damping=arm_damping,
                 arm_damp_kd=self._args.arm_damp_kd,
                 arm_damp_blend=arm_damp_blend,
@@ -4747,6 +4778,13 @@ class StudyManagerApp(QMainWindow):
         self._args = args
         self._state = _S_INIT
         self._recording_active = False
+        # Single-operator SOLO recording (robot CSV + body pose only; no session, cameras or
+        # peer). Independent of the study's session/_recording_active machinery.
+        self._solo_rec_active = False
+        self._solo_root: str | None = None        # {output_dir}/solo_{date}_{time} (per run)
+        self._last_solo_dir: str | None = None    # last take's attempt dir (View Last)
+        self._solo_rec_dir: str | None = None     # current take's robot{N}/ folder
+        self._solo_sim_addrs = None               # sim qpos addrs per segment (no-hw fallback)
         # Auto resume-on-boot: after a crash/restart, prompt ONCE to resume a study that's still
         # in progress (this machine's saved state, or the OTHER machine's live session over the
         # link). Delayed a few seconds so the peer link can connect first (prefer its live state).
@@ -4965,6 +5003,11 @@ class StudyManagerApp(QMainWindow):
         self._kneeling_window: KneelingPoseCalibrationWindow | None = None
         self._abduction_window: ArmAbductionLimitWindow | None = None
 
+        self._dual_study = (self._cfg["operator_mode"] == "study")
+        self._leg_stance = self._cfg["leg_stance"]
+        # args.kneeling is read throughout the robot code; keep it derived from the mode.
+        self._args.kneeling = self._kneeling_active()
+
         # Load any saved per-robot kneeling-pose trim and pre-compute the
         # calibrated locked leg angles + held waist angle. These are used in
         # place of the nominal _KNEELING_ANGLES everywhere the kneel pose is
@@ -4974,6 +5017,16 @@ class StudyManagerApp(QMainWindow):
         self._kneeling_angles = self._kneeling_cal.apply_to_legs(_KNEELING_ANGLES)
         self._kneeling_torso = (self._kneeling_cal.torso_offset_vector()
                                 if args.kneeling else np.zeros(3))
+        # Standing-stance leg hold = Unitree's standing default, read from the SAME g1.yaml
+        # the hardware Controller uses (exactly what q_goal_legs=None would command). Held
+        # explicitly (not None) so the leg position-error clamp applies when standing too.
+        from projects.g1_upper_body_teleop.config import Config as _G1Config
+        self._standing_angles = np.asarray(
+            _G1Config(str(_HERE.parent / "g1_upper_body_teleop" / "g1.yaml")).default_angles,
+            dtype=np.float64)
+        # Set once the PHYSICAL bootup starts: from then on the stance is frozen for this
+        # manager run (the legs are holding it; switching needs a restart). See _apply_stance.
+        self._stance_locked = False
 
         # Load any saved max arm-abduction limit (shoulder-roll clamp) that keeps
         # the shoulder heat sinks from self-colliding when the arms raise outward.
@@ -4987,17 +5040,24 @@ class StudyManagerApp(QMainWindow):
         # Video streaming is ON by default — launch mediamtx + zed_to_mediamtx
         # shortly after the UI is up (independent of the robot init).
         QTimer.singleShot(300, self._start_video_streaming_default)
-        if self._cfg["link_role"] != "none":
+        # Study-only services. Single-operator mode never starts the peer link (even with a
+        # persisted link role) or the ZED-calibration check (it only feeds recording meta).
+        if self._dual_study and self._cfg["link_role"] != "none":
             QTimer.singleShot(600, self._init_link)
         # Flag a missing ZED calibration conf right at startup (esp. on the peer).
-        QTimer.singleShot(900, self._check_zed_calibration)
+        if self._dual_study:
+            QTimer.singleShot(900, self._check_zed_calibration)
 
     # =========================================================================
     # UI construction
     # =========================================================================
 
+    def _window_title(self):
+        what = "User Study Manager" if self._dual_study else "Single-Operator Teleop"
+        return f"G1 Inspire Hand — {what}  (Robot {self._robot_id})"
+
     def _setup_ui(self):
-        self.setWindowTitle(f"G1 Inspire Hand — User Study Manager  (Robot {self._robot_id})")
+        self.setWindowTitle(self._window_title())
         # Taller minimum + initial size so the Data Collection column's stack of
         # buttons opens at full height instead of being vertically compressed until
         # the window is hand-stretched. (_init_link grows it further when the extra
@@ -5026,6 +5086,21 @@ class StudyManagerApp(QMainWindow):
         scroll.setFrameShape(QFrame.NoFrame)
         scroll.setWidget(central)
         self.setCentralWidget(scroll)
+
+        # ── Operator mode (single operator ⇄ dual-operator study) ──────────────
+        # Single (default) shows only what one operator needs to run THIS robot; the study
+        # adds the peer link, sessions/recording, cameras + calibration, twin/dataset tools.
+        # Switching is refused while the robot is up / teleop runs / a session is open (see
+        # _update_buttons for the tooltip that says why).
+        mode_bar = QHBoxLayout()
+        self._btn_operator_mode = QPushButton()
+        self._btn_operator_mode.clicked.connect(self._on_toggle_operator_mode)
+        mode_bar.addWidget(self._btn_operator_mode)
+        self._operator_mode_lbl = QLabel()
+        self._operator_mode_lbl.setStyleSheet("color: #7f8c8d; font-size: 11px;")
+        mode_bar.addWidget(self._operator_mode_lbl)
+        mode_bar.addStretch()
+        root_layout.addLayout(mode_bar)
 
         # ── Session bar ───────────────────────────────────────────────────────
         session_bar = QHBoxLayout()
@@ -5079,7 +5154,8 @@ class StudyManagerApp(QMainWindow):
         # Robot selector — which physical G1 this machine is. Locked while
         # recording so the identity can never change mid-session. Persisted, so
         # each machine reopens on its own robot.
-        session_bar.addWidget(QLabel("Robot:"))
+        self._robot_lbl = QLabel("Robot:")
+        session_bar.addWidget(self._robot_lbl)
         self._robot_combo = QComboBox()
         self._robot_combo.addItems(["1", "2"])
         self._robot_combo.setCurrentIndex(self._robot_id - 1)
@@ -5095,6 +5171,10 @@ class StudyManagerApp(QMainWindow):
         self._outdir_edit = QLineEdit(self._args.output_dir)
         session_bar.addWidget(self._outdir_edit, 1)
         root_layout.addLayout(session_bar)
+        # Everything in the session bar except the Robot selector is study-only.
+        self._study_only_widgets = [
+            session_bar.itemAt(i).widget() for i in range(session_bar.count())
+            if session_bar.itemAt(i).widget() not in (None, self._robot_lbl, self._robot_combo)]
 
         # ── Setup bar (per-machine; persisted; no CLI flags needed) ────────────
         setup_bar = QHBoxLayout()
@@ -5132,7 +5212,8 @@ class StudyManagerApp(QMainWindow):
             "connect to the HEADSET over Bluetooth, so if they still don't buzz after this, "
             "re-pair them on the headset. Disabled mid-take (it drops the Quest link).")
         setup_bar.addWidget(self._btn_reboot_webrtc)
-        setup_bar.addWidget(QLabel("Link:"))
+        self._link_role_lbl = QLabel("Link:")
+        setup_bar.addWidget(self._link_role_lbl)
         self._link_role_combo = QComboBox()
         self._link_role_combo.addItems(["None", "Master", "Peer"])
         self._link_role_combo.setCurrentText(self._cfg["link_role"].capitalize())
@@ -5141,7 +5222,8 @@ class StudyManagerApp(QMainWindow):
             "(obeys master). None = standalone.")
         self._link_role_combo.currentIndexChanged.connect(self._on_setup_changed)
         setup_bar.addWidget(self._link_role_combo)
-        setup_bar.addWidget(QLabel("Link IP:"))
+        self._link_host_lbl = QLabel("Link IP:")
+        setup_bar.addWidget(self._link_host_lbl)
         self._link_host_edit = QLineEdit(self._cfg["link_host"])
         self._link_host_edit.setMaximumWidth(150)
         self._link_host_edit.setPlaceholderText("blank = this PC listens")
@@ -5174,6 +5256,10 @@ class StudyManagerApp(QMainWindow):
         self._link_peer_lbl = QLabel("Link: off")
         self._link_peer_lbl.setStyleSheet("font-weight: bold; color: #7f8c8d;")
         setup_bar.addWidget(self._link_peer_lbl)
+        self._study_only_widgets += [
+            self._link_role_lbl, self._link_role_combo, self._link_host_lbl,
+            self._link_host_edit, self._btn_link_connect, self._btn_link_disconnect,
+            self._link_light, self._link_peer_lbl]
         setup_bar.addSpacing(10)
         # PEER side: the master's rsync destination is AUTO-identified from the live link
         # (master IP from the socket + username/recordings dir from the master's status) —
@@ -5260,6 +5346,25 @@ class StudyManagerApp(QMainWindow):
         teleop_col.addWidget(self._btn_stop_teleop_peer)
         for _w in (self._peer_teleop_lbl, self._btn_start_teleop_peer, self._btn_stop_teleop_peer):
             _w.setVisible(False)                   # revealed only on the master when linked
+        # ── Single-operator recording (hidden in study mode, which records via sessions) ──
+        # One toggle: each Start opens a new take folder the digital twin / session viewer can
+        # play back. Records ONLY this robot's joint/hand CSV (+ tactile) and the operator's
+        # XR body pose — no cameras, crate, head-cam, transcript or peer data.
+        self._btn_solo_rec = QPushButton("⏺  Start Recording")
+        self._btn_solo_rec.clicked.connect(self._on_toggle_solo_recording)
+        self._btn_solo_rec.setToolTip(
+            "Record THIS robot (joint + hand state CSV, tactile) and the operator's XR body pose "
+            "into a new take folder (solo_<date>_<time>/solo/attempt<K>/robot<N>/ under the "
+            "output dir). Works with teleop on or off. No camera recording. Play it back with "
+            "View Last / Open Digital Twin…")
+        teleop_col.addWidget(self._btn_solo_rec)
+        self._solo_rec_lbl = QLabel("Recording: off")
+        self._solo_rec_lbl.setAlignment(Qt.AlignCenter)
+        self._solo_rec_lbl.setWordWrap(True)
+        self._solo_rec_lbl.setStyleSheet("color: gray; font-size: 10px;")
+        teleop_col.addWidget(self._solo_rec_lbl)
+        self._single_only_widgets = [self._btn_solo_rec, self._solo_rec_lbl]
+        self._refresh_solo_rec_ui()
         # ── divider: teleop controls (above) │ hardware / reboot / settings (below) ──
         teleop_col.addSpacing(8)
         _hw_sep = QFrame()
@@ -5334,6 +5439,7 @@ class StudyManagerApp(QMainWindow):
         self._btn_kneel_calib = QPushButton("🧎  Kneeling Pose Calibration")
         self._btn_kneel_calib.clicked.connect(self._on_show_kneeling_calibration)
         self._btn_kneel_calib.setStyleSheet("QPushButton { padding: 8px; }")
+        self._btn_kneel_calib.setEnabled(bool(self._args.kneeling))   # kneel-only (_refresh_stance_ui)
         teleop_col.addWidget(self._btn_kneel_calib)
         self._btn_abduction = QPushButton("💪  Arm Abduction Limit")
         self._btn_abduction.clicked.connect(self._on_show_abduction_limit)
@@ -5873,7 +5979,17 @@ class StudyManagerApp(QMainWindow):
             "calibration and link are preserved so the study resumes; pose + control "
             "reset only (firmware faults need a G1 power cycle). Both modes confirm "
             "first — the robot moves.")
+        # Leg stance (single-operator only; study mode always kneels). Chosen BEFORE bootup —
+        # it decides the boot/shutdown choreography — and frozen once the robot boots.
+        stance_row = QHBoxLayout()
+        stance_row.addWidget(QLabel("Leg stance:"))
+        self._stance_combo = QComboBox()
+        self._stance_combo.addItems(["Standing (gantry)", "Kneeling"])   # index 1 = kneeling
+        self._stance_combo.currentIndexChanged.connect(self._on_stance_combo_changed)
+        stance_row.addWidget(self._stance_combo, 1)
+        safety_col.addLayout(stance_row)
         safety_col.addWidget(self._btn_bootup)
+        self._refresh_stance_ui()
         # Big, always-enabled emergency stop: instantly damps the ROBOT — the manager app
         # keeps running (see _on_estop_kill; Quit Manager below closes the app). Requires TWO
         # clicks within 1 s (with a "click again" prompt between them) so a stray single
@@ -6196,6 +6312,12 @@ class StudyManagerApp(QMainWindow):
         self._apply_role_visibility()
         # Apply the User Study / Data Collection mode (hides Good/Bad marking in study mode).
         self._apply_mode_visibility()
+        # Study-only groups + widgets, hidden in single-operator mode. (Role-specific twin /
+        # send / peer-dest widgets are gated in _apply_role_visibility instead.)
+        self._twin_box = twin_box
+        self._study_only_widgets += [data_box, calib_box, wrench_box, self._btn_force_calib,
+                                     self._wrench_csv_lbl, self._dataset_status_lbl]
+        self._apply_operator_mode()
 
     @staticmethod
     def _status_label(text: str, color: str) -> QLabel:
@@ -6280,7 +6402,7 @@ class StudyManagerApp(QMainWindow):
         # Room transcription (own process; models load there — nothing blocks here). MASTER /
         # standalone only — the peer never auto-starts it (transcription + mic are master-only).
         self._transcribe_on = bool(self._cfg.get("transcribe_enabled", True))
-        if self._transcribe_on and self._transcription_allowed():
+        if self._dual_study and self._transcribe_on and self._transcription_allowed():
             QTimer.singleShot(2500, self._init_transcriber)
         self._refresh_transcribe_button()
         if self._args.dry_run:
@@ -6299,7 +6421,7 @@ class StudyManagerApp(QMainWindow):
         from xrt_devices.study import StudyXRDevice as XRRTCBodyPoseDevice
         from projects.inspire_hand_teleop.inspire_hand_haptics_streamer import InspireHandHapticsStreamer
         from projects.inspire_hand_teleop.motor_stats_streamer import MotorStatsStreamer
-        from proj_xrt.g1_adapter import G1FullBodySEWSolver
+        from proj_xrt.g1_adapter import G1FullBodySEWSolver, STUDY_GEOMETRY_CONFIG
         from projects.inspire_hand_teleop.g1_with_inspire_hand_mujoco_controller import G1InspireHandMuJoCoController
         from projects.inspire_hand_teleop.inspire_hand_hw_controller import InspireHandController
         from projects.g1_upper_body_teleop.config import Config
@@ -6398,13 +6520,17 @@ class StudyManagerApp(QMainWindow):
             control_rate_hz=float(args.ik_rate),
             elbow_filter_cutoff_hz=2.0,
             collision_avoidance_enabled=args.safety_filter,
+            # Study: 30 rad/s wrist cap + the study keep-out geometry; single operator: no
+            # cap, backend-default geometry. Re-applied on a mode switch (_apply_operator_mode).
+            wrist_rate_limit=self._dual_study,
+            geometry_config_path=STUDY_GEOMETRY_CONFIG if self._dual_study else None,
         )
 
         # MuJoCo controller
         self._controller = G1InspireHandMuJoCoController(self._model, self._data, debug=False)
-        if args.kneeling:
-            self._controller.q_goal_left_leg  = self._kneeling_angles[:6].copy()
-            self._controller.q_goal_right_leg = self._kneeling_angles[6:].copy()
+        # Sim legs show the active stance's hold (calibrated kneel, or the standing default).
+        self._controller.q_goal_left_leg  = self._stance_legs()[:6].copy()
+        self._controller.q_goal_right_leg = self._stance_legs()[6:].copy()
 
         # MuJoCo viewer — CLOSED by default so its 50 Hz render never steals GIL/CPU from the
         # WebRTC teleop loop during a study. Open on demand with the "Show Live 3D Viewer"
@@ -6480,7 +6606,7 @@ class StudyManagerApp(QMainWindow):
     def _init_transcriber(self):
         """Spawn the transcriber subprocess (idempotent). Model loading happens in
         the subprocess; the manager never blocks on it."""
-        if self._transcriber is not None or not self._transcribe_on:
+        if self._transcriber is not None or not self._transcribe_on or not self._dual_study:
             return
         if not self._transcription_allowed():
             self._log("[transcribe] disabled on the PEER — transcription and the mic run on "
@@ -6884,18 +7010,29 @@ class StudyManagerApp(QMainWindow):
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Warning)
         box.setWindowTitle("Bootup Robot")
-        box.setText("Boot up the ROBOT hardware?\n\nThe robot WILL MOVE: hands close "
-                    "into a fist, the arms spread out + lift behind it, and it rises "
-                    "into the kneeling pose (~10 s), then the arms drop limp.\n\nMake "
-                    "sure the area around the robot and the table in front of it are "
-                    "clear.")
+        if self._args.kneeling:
+            box.setText("Boot up the ROBOT hardware?\n\nThe robot WILL MOVE: hands close "
+                        "into a fist, the arms spread out + lift behind it, and it rises "
+                        "into the kneeling pose (~10 s), then the arms drop limp.\n\nMake "
+                        "sure the area around the robot and the table in front of it are "
+                        "clear.")
+        else:
+            box.setText(self._STANDING_GANTRY_WARNING + "\n\nBoot up the ROBOT hardware? "
+                        "The robot WILL MOVE: hands close into a fist, then the legs move "
+                        "slowly (~5 s) into Unitree's standing pose with the arms held where "
+                        "they hang, then the arms go limp.\n\nClear the area around the "
+                        "robot.")
         go = box.addButton("Boot up", QMessageBox.AcceptRole)
         box.addButton("Cancel", QMessageBox.RejectRole)
         box.setDefaultButton(box.buttons()[-1])   # default = Cancel
+        gantry_chk = self._add_gantry_check(box)
         box.exec_()
-        if box.clickedButton() is not go:
+        if box.clickedButton() is not go or not self._gantry_confirmed(gantry_chk, "bootup"):
             self._log("[bootup] cancelled.")
             return
+        # The hardware is about to be driven in this stance → freeze it for this run.
+        self._stance_locked = True
+        self._refresh_stance_ui()
         self._btn_bootup.setEnabled(False)
         self._btn_bootup.setText("🤖  Booting…")
         QApplication.processEvents()
@@ -6954,18 +7091,27 @@ class StudyManagerApp(QMainWindow):
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Warning)
         box.setWindowTitle("Reboot Robot")
-        box.setText("Boot the robot up AGAIN?\n\nThe robot WILL MOVE: from its current "
-                    "slumped pose it closes the hands, spreads + raises the arms, and "
-                    "rises back into the kneel (~10 s).\n\nEverything else is "
-                    "PRESERVED — open session, camera anchors, calibration, peer link — "
-                    "so the study resumes where it left off.\n\nNOTE: this resets pose "
-                    "+ control only. For robot firmware faults, power-cycle the G1 "
-                    "instead. Clear the area around the robot.")
+        if self._args.kneeling:
+            box.setText("Boot the robot up AGAIN?\n\nThe robot WILL MOVE: from its current "
+                        "slumped pose it closes the hands, spreads + raises the arms, and "
+                        "rises back into the kneel (~10 s).\n\nEverything else is "
+                        "PRESERVED — open session, camera anchors, calibration, peer link — "
+                        "so the study resumes where it left off.\n\nNOTE: this resets pose "
+                        "+ control only. For robot firmware faults, power-cycle the G1 "
+                        "instead. Clear the area around the robot.")
+        else:
+            box.setText(self._STANDING_GANTRY_WARNING + "\n\nBoot the robot up AGAIN? "
+                        "The robot WILL MOVE: hands close, then the legs move slowly (~5 s) "
+                        "back into Unitree's standing pose, then the arms go limp. Session "
+                        "and calibration state are preserved.\n\nNOTE: this resets pose + "
+                        "control only. For robot firmware faults, power-cycle the G1 "
+                        "instead. Clear the area around the robot.")
         go = box.addButton("Reboot", QMessageBox.AcceptRole)
         box.addButton("Cancel", QMessageBox.RejectRole)
         box.setDefaultButton(box.buttons()[-1])   # default = Cancel
+        gantry_chk = self._add_gantry_check(box)
         box.exec_()
-        if box.clickedButton() is not go:
+        if box.clickedButton() is not go or not self._gantry_confirmed(gantry_chk, "reboot"):
             self._log("[reboot] cancelled.")
             return
         self._btn_bootup.setEnabled(False)
@@ -7013,17 +7159,21 @@ class StudyManagerApp(QMainWindow):
         # Re-arm the one-shot bootup machinery: with _hw_booted False, the whole
         # first-boot path (guards + failure handler + retry button) applies as-is.
         self._hw_booted = False
+        if getattr(self, "_solo_rec_active", False):  # a take never spans a reboot
+            self._solo_stop_recording("robot reboot")
 
     def _bootup_robot_hw(self):
         """The physical bootup choreography (moved verbatim from _init_core; blocking,
         ~10 s, animates the sim viewer in lock-step)."""
         args = self._args
-        # Release high-level FSM if kneeling
-        if args.kneeling:
-            self._log("Releasing high-level motion mode...")
-            from projects.inspire_hand_teleop.demo_g1_inspire_xr_robot_teleop_full_body_hw import release_motion_mode
-            release_motion_mode()
-            time.sleep(0.5)
+        # Release the high-level FSM in BOTH stances: the manager owns the robot through
+        # low-level rt/lowcmd only, and a still-active sport/balance FSM would fight that
+        # stream (standing has no balance controller of ours — the gantry carries it).
+        # A no-op when no motion mode is active.
+        self._log("Releasing high-level motion mode...")
+        from projects.inspire_hand_teleop.demo_g1_inspire_xr_robot_teleop_full_body_hw import release_motion_mode
+        release_motion_mode()
+        time.sleep(0.5)
 
         # Hand gesture before any arm motion: first a THUMBS-UP, then curl the
         # thumb in to complete a full FIST. DOF order is [pinky, ring, middle,
@@ -7080,6 +7230,12 @@ class StudyManagerApp(QMainWindow):
             mujoco.mj_forward(self._model, self._data)
             if self._viewer is not None:            # viewer is optional / closed by default
                 self._viewer.sync()
+
+        if not args.kneeling:
+            # STANDING (gantry): none of the kneel staging — one plain, slow move.
+            self._bootup_standing_move(_mtp_sync)
+            self._bootup_attach_hw_tools()
+            return
 
         # Use the SAME (boosted) hip/knee gains the ongoing sends use, so the legs
         # reach and hold their target firmly during the move instead of sagging
@@ -7141,6 +7297,75 @@ class StudyManagerApp(QMainWindow):
                 self._viewer.sync()
             time.sleep(_ramp_dt)
 
+        self._bootup_attach_hw_tools()
+
+    # Standing bring-up duration (s): the hanging legs only travel a few tenths of a rad to
+    # the standing default, so this is deliberately slower than Unitree's 2 s default move.
+    _STANDING_BOOTUP_SECS = 5.0
+    _STANDING_GANTRY_WARNING = (
+        "⚠ STANDING STANCE — the robot MUST be hanging from a gantry / stand.\n\n"
+        "Balance control is OFF (low-level joint control only): the legs are held in "
+        "Unitree's standing pose but NOTHING keeps the robot upright. Unsupported, it "
+        "WILL fall.")
+
+    def _add_gantry_check(self, box):
+        """Standing stance only: an unchecked 'robot is on a gantry' box the operator must
+        tick for the bootup/reboot to proceed. Returns the checkbox (None when kneeling)."""
+        if self._args.kneeling:
+            return None
+        chk = QCheckBox("The robot is hanging from a gantry / stand and cannot fall")
+        box.setCheckBox(chk)
+        return chk
+
+    def _gantry_confirmed(self, chk, tag):
+        if chk is None or chk.isChecked():
+            return True
+        self._log(f"[{tag}] standing stance needs the gantry box ticked — not booting.")
+        return False
+
+    def _bootup_standing_move(self, on_step):
+        """Standing (gantry) bring-up: ONE slow smoothstep move of the legs to Unitree's
+        standing default (g1.yaml default_angles) and the waist to neutral, with the arms
+        HELD where they currently hang (no sweep toward a table), at stock gains; then ease
+        the arms into the control loop's idle damping, exactly like the kneel bootup's
+        final step. Blocking; caller must be the sole publisher."""
+        args = self._args
+        hw = self._hw_controller
+        legs = self._standing_angles
+        cur_t, cur_l, cur_r = hw.get_current_upper_body()
+        # Waist to neutral, except roll/pitch under a mechanical lock (--waist-locked): hold
+        # them where the lock has them so the motors don't stall against it.
+        torso = np.zeros(3)
+        if getattr(args, "waist_locked", True):
+            torso[1:] = np.asarray(cur_t, dtype=float)[1:3]
+        self._log(f"Bootup (standing): moving the legs to the standing pose over "
+                  f"{self._STANDING_BOOTUP_SECS:.0f}s (arms held where they hang)...")
+        hw.move_to_pose(
+            q_goal_legs=legs, total_time=self._STANDING_BOOTUP_SECS,
+            q_goal_upper=np.concatenate((torso, cur_l, cur_r)),
+            on_step=on_step)                       # stock leg/ankle gains (see _leg_gain_scales)
+        self._log("Bootup (standing): easing the arms into damp mode...")
+        leg_kp, leg_kd, ankle_kp, ankle_kd = _leg_gain_scales(args)
+        dt = 0.01
+        steps = int(1.0 / dt)
+        for i in range(steps + 1):
+            f = i / steps
+            hw.send_upper_body_targets(
+                q_goal_torso=torso, q_goal_left=cur_l, q_goal_right=cur_r,
+                q_goal_legs=legs,
+                kp_scale=args.hw_kp_scale, kd_scale=args.hw_kd_scale,
+                leg_kp_scale=leg_kp, leg_kd_scale=leg_kd,
+                ankle_kp_scale=ankle_kp, ankle_kd_scale=ankle_kd,
+                arm_damping=True, arm_damp_kd=args.arm_damp_kd,
+                arm_damp_blend=f * f * (3.0 - 2.0 * f),
+            )
+            on_step(torso, cur_l, cur_r)
+            time.sleep(dt)
+
+    def _bootup_attach_hw_tools(self):
+        """Post-choreography bootup tail shared by both stances: recorder handles, wrench
+        worker, motor monitor."""
+        args = self._args
         # Give the unified raw recorder its hardware + hand handles.
         self._session_recorder._hw   = self._hw_controller
         self._session_recorder._hand = self._hand_controller
@@ -7186,6 +7411,11 @@ class StudyManagerApp(QMainWindow):
         if args.kneeling:
             self._control_thread.set_kneeling_pose(
                 self._kneeling_angles, self._kneeling_torso)
+        else:
+            # Standing: hold the standing default EXPLICITLY (the thread's default is
+            # legs=None → firmware-side defaults with no position-error clamp) and a
+            # neutral waist (no kneel torso trim).
+            self._control_thread.set_kneeling_pose(self._standing_angles, np.zeros(3))
         # Apply the saved arm-abduction limit so the shoulder heat sinks are
         # protected from the very first teleop command.
         self._control_thread.set_abduction_limits(
@@ -7324,7 +7554,8 @@ class StudyManagerApp(QMainWindow):
         # qpos from the sim (set each tick by the controller's kinematic
         # apply_control) so playback animates the hands. Runs before the
         # state-specific apply_control, so finger qpos lags one tick (~20 ms).
-        if self._recording_active and self._session_recorder._active:
+        if ((self._recording_active or self._solo_rec_active)
+                and self._session_recorder._active):
             fl = fr = None
             if self._finger_qpos_addrs is not None and self._data is not None:
                 try:
@@ -7338,16 +7569,17 @@ class StudyManagerApp(QMainWindow):
                     snap = self._hand_controller.read()
                 except Exception:
                     snap = None
-            # Leg goal "down to the knees" (8: hip+knee per leg) from the
-            # calibrated kneeling angles, or None when not kneeling.
-            q_goal_legs = (self._kneeling_angles[_LEG_KNEE_SEL]
-                           if self._args.kneeling else None)
+            # Leg goal "down to the knees" (8: hip+knee per leg) from the active
+            # stance's hold (calibrated kneel, or the standing default).
+            q_goal_legs = self._stance_legs()[_LEG_KNEE_SEL]
             self._session_recorder.capture(
                 q_goal_torso=self._q_goal_torso,
                 q_goal_left=self._q_goal_left,
                 q_goal_right=self._q_goal_right,
                 q_goal_legs=q_goal_legs,
                 finger_left=fl, finger_right=fr, snapshot=snap,
+                sim_q=(self._solo_sim_q() if self._solo_rec_active
+                       and self._session_recorder._hw is None else None),
             )
 
         if self._state in (_S_IDLE, _S_WAITING):
@@ -7416,6 +7648,9 @@ class StudyManagerApp(QMainWindow):
         row.setContentsMargins(8, 2, 8, 2)
         self._lights = {}
         self._rec_dots = {}            # per-robot flashing REC indicator (id -> QLabel)
+        # Kept so single-operator mode can hide the peer robot / crate cams / study-only rows.
+        self._status_robot_boxes = {}
+        self._light_rows = {}
         comps = [("robot", "Robot"), ("neck", "Neck"),
                  ("headcam", "Head cam (D435)"), ("zed", "ZED"),
                  ("zedcal", "ZED calib")]
@@ -7427,6 +7662,7 @@ class StudyManagerApp(QMainWindow):
 
         for rid in (1, 2):
             g = QGroupBox(f"Robot {rid}" + (" (Master)" if rid == 1 else " (Peer)"))
+            self._status_robot_boxes[rid] = g
             grid = QGridLayout(g)
             grid.setContentsMargins(6, 2, 6, 2)
             grid.setVerticalSpacing(1)
@@ -7443,9 +7679,11 @@ class StudyManagerApp(QMainWindow):
                 lb = QLabel(label)
                 lb.setStyleSheet("font-size: 11px;")
                 grid.addWidget(lb, r + 1, 1)
+                self._light_rows[(rid, key)] = (dot, lb)
             row.addWidget(g)
 
         cg = QGroupBox("Crate cams (2× external)")
+        self._status_crate_box = cg
         cgrid = QGridLayout(cg)
         cgrid.setContentsMargins(6, 2, 6, 2)
         cgrid.setVerticalSpacing(1)
@@ -8250,16 +8488,16 @@ class StudyManagerApp(QMainWindow):
         self._log("*** ROBOT LINK RESTORED. Reclaiming low-level control (releasing the "
                   "high-level FSM) + re-syncing to the robot's actual pose. Teleop is NOT "
                   "auto-resumed — re-engage manually (staged) so nothing snaps. If the "
-                  "robot stood up during the outage, bring it back to the kneel first. ***")
+                  "robot stood up during the outage, bring it back to its rest pose first. ***")
         # If a locomotion FSM grabbed control during the outage (the stand-up), release it
-        # again so low-level rt/lowcmd regains exclusive ownership.
-        if getattr(self._args, "kneeling", False):
-            try:
-                from projects.inspire_hand_teleop.demo_g1_inspire_xr_robot_teleop_full_body_hw \
-                    import release_motion_mode
-                release_motion_mode()
-            except Exception as exc:
-                self._log(f"[watchdog] FSM re-release failed: {exc}")
+        # again so low-level rt/lowcmd regains exclusive ownership (both stances: the
+        # manager is low-level only, see _bootup_robot_hw).
+        try:
+            from projects.inspire_hand_teleop.demo_g1_inspire_xr_robot_teleop_full_body_hw \
+                import release_motion_mode
+            release_motion_mode()
+        except Exception as exc:
+            self._log(f"[watchdog] FSM re-release failed: {exc}")
         # Re-sync the sim/viewer to the robot's real current pose (it was frozen/stale).
         try:
             q_t, q_l, q_r = self._hw_controller.get_current_upper_body()
@@ -8557,6 +8795,13 @@ class StudyManagerApp(QMainWindow):
             self._haptics_streamer._device = new
         if self._motor_stats_streamer is not None:
             self._motor_stats_streamer._device = new
+        if self._solo_rec_active and self._solo_rec_dir:
+            # A solo take keeps recording the operator's body pose on the new server.
+            try:
+                new.configure_recording(output_dir=self._solo_rec_dir, record_data=True,
+                                        started=False)
+            except Exception as exc:                      # noqa: BLE001
+                self._log(f"[record] body pose re-arm after WebRTC reboot failed: {exc}")
         self._webrtc_reboot_inflight = False
         self._log("[webrtc] WebRTC server rebooted — fresh haptics/pose channels; waiting for the "
                   "Quest to reconnect.")
@@ -8830,6 +9075,9 @@ class StudyManagerApp(QMainWindow):
 
     def _on_show_kneeling_calibration(self):
         """Open (or raise) the kneeling-pose trim window."""
+        if not self._args.kneeling:
+            self._log("[kneel-cal] Kneeling Pose Calibration is for the kneeling stance only.")
+            return
         if self._kneeling_window is None:
             self._kneeling_window = KneelingPoseCalibrationWindow(
                 calibration=self._kneeling_cal,
@@ -8933,18 +9181,22 @@ class StudyManagerApp(QMainWindow):
     def _on_view_last_recording(self):
         """Open the MOST RECENT recording in the digital-twin viewer (table + crate +
         both robots + EE wrench + tactile fingertip/palm overlay + synced ZED video).
-        The twin gracefully shows just this robot until the peer's data is merged in."""
-        if not self._last_session_dir or not os.path.isdir(self._last_session_dir):
-            self._log("No recording to view yet — record a session first.")
+        The twin gracefully shows just this robot until the peer's data is merged in.
+        Single-operator mode opens the last SOLO take (one robot, no table/crate/video)."""
+        last = self._last_session_dir if self._dual_study else self._last_solo_dir
+        if not last or not os.path.isdir(last):
+            self._log("No recording to view yet — record "
+                      + ("a session" if self._dual_study else "one (⏺ Start Recording)")
+                      + " first.")
             return
-        self._launch_digital_twin(self._last_session_dir)
+        self._launch_digital_twin(last)
 
     # ── Digital twin: send peer data to master + open the reconstruction ───────
     def _master_rsync_dest(self):
         """PEER's rsync destination on the master, resolved AUTOMATICALLY (no manual entry):
           • master username + recordings dir from the master's live status (sent nested
-            under 'components'), falling back to the baked-in master_ssh_user / master_rec_dir
-            defaults so a freshly git-pulled peer works before the master's first status;
+            under 'components'), falling back to the configured master_ssh_user /
+            master_rec_dir (a blank user means ssh's default: this machine's login name);
           • master IP from the peer's Link-IP field / live socket, falling back to master_host.
         A non-blank ``master_rsync_dest`` in the config overrides all of it. Returns '' only if
         neither a host nor a recordings path can be determined."""
@@ -9323,8 +9575,11 @@ class StudyManagerApp(QMainWindow):
         """Reconstruct table + crate + BOTH robots in one MuJoCo scene. Pick the TRIAL
         PARENT folder (holding the V / A+V / H+V / H+A+V conditions) to tab across every
         condition + attempt in one window — or a single attempt folder (either robot's)."""
-        start_dir = (self._last_session_root or self._last_session_dir
-                     or self._outdir_edit.text() or self._args.output_dir)
+        if self._dual_study:
+            start_dir = (self._last_session_root or self._last_session_dir
+                         or self._outdir_edit.text() or self._args.output_dir)
+        else:
+            start_dir = self._solo_root or self._output_dir_path()
         start_dir = os.path.abspath(start_dir) if start_dir else os.getcwd()
         path = QFileDialog.getExistingDirectory(
             self, "Select the TRIAL PARENT folder (V / A+V / H+V / H+A+V) to tab across "
@@ -9446,20 +9701,22 @@ class StudyManagerApp(QMainWindow):
         # user + recordings dir from the master's live status. Set master_rsync_dest to a
         # full 'user@host:/path' only to FORCE a fixed destination (overrides everything).
         "master_rsync_dest": "",
-        # Baked-in fallbacks describing THIS study's master machine (MEL07649L), used by
-        # the peer when the master's live status hasn't arrived yet — so a freshly git-
-        # pulled peer resolves the destination with no manual setup. The live Link-IP /
-        # socket IP still WINS over master_host when the link is up (survives DHCP changes).
-        "master_ssh_user": "agraves36",
+        # Fallbacks describing the master machine, used by the peer when the master's live
+        # status hasn't arrived yet. Set them in ~/.xrt_study_config.json for an offline
+        # send. A blank ssh user lets ssh use this machine's login name (same account on
+        # both machines). The live Link-IP / socket IP still WINS over master_host when the
+        # link is up (survives DHCP changes).
+        "master_ssh_user": "",
         "master_rec_dir": str(_REPO_ROOT / "xr_recordings"),
-        "master_host": "192.168.7.226",
+        "master_host": "",
         # Symmetric fallbacks describing the PEER machine, used by the MASTER's "Sync Peer
         # Data" button to rsync-PULL the peer's recordings over SSH — so old unsynced data
         # can be pulled WITHOUT the peer manager running. peer_host is auto-remembered from
         # the live link whenever the peer manager connects; set it here for pure-offline
         # pulls. peer_rec_dir defaults to this machine's own recordings path (symmetric
-        # deploy). peer_rsync_src ('user@host:/path') overrides all of it.
-        "peer_ssh_user": "agraves36",
+        # deploy). peer_rsync_src ('user@host:/path') overrides all of it. A blank
+        # peer_ssh_user lets ssh use this machine's login name.
+        "peer_ssh_user": "",
         "peer_rec_dir": str(_REPO_ROOT / "xr_recordings"),
         "peer_host": "",
         "peer_rsync_src": "",
@@ -9473,6 +9730,14 @@ class StudyManagerApp(QMainWindow):
         # bundle has arrived. Master-side this is ignored (contribution is a peer→master
         # feed). Set False to go back to manual.
         "crate_contribute_default": True,
+        # Operator mode: "single" (default) = one operator teleoperating this robot, with
+        # the study machinery off; "study" = the dual-operator user study (peer link, crate
+        # tracking, external cameras, study collision geometry, wrist rate limit, ...).
+        "operator_mode": "single",
+        # Single-operator leg stance: "standing" (default; the robot MUST hang from a
+        # gantry/stand: low-level control has no balance) or "kneeling" (the study's kneel
+        # with its staged boot-up / shutdown). Study mode always kneels.
+        "leg_stance": "standing",
         # UI mode: True = User Study Mode (default, no Good/Bad attempt marking), False =
         # Data Collection Mode (exposes the Mark Good / Mark Bad demo-quality buttons).
         "study_mode": True,
@@ -9512,7 +9777,15 @@ class StudyManagerApp(QMainWindow):
         # new combined file
         try:
             with open(self._cfg_path) as f:
-                cfg.update({k: v for k, v in json.load(f).items() if k in cfg})
+                saved = json.load(f)
+            cfg.update({k: v for k, v in saved.items() if k in cfg})
+            # A config saved before operator modes existed is a study rig that always knelt
+            # (robot on the floor, no gantry): keep it in study mode + kneeling instead of
+            # silently picking up the new single/standing defaults on its next bootup.
+            if "operator_mode" not in saved:
+                cfg["operator_mode"] = "study"
+            if "leg_stance" not in saved:
+                cfg["leg_stance"] = "kneeling"
         except Exception:
             # migrate the old robot-id-only file if present
             try:
@@ -9542,6 +9815,16 @@ class StudyManagerApp(QMainWindow):
         # Eco / compliance use BooleanOptionalAction with default=None: None means
         # neither --flag nor --no-flag was passed → keep the persisted value; a real
         # bool means it was explicitly forced ON (--flag) or OFF (--no-flag) at boot.
+        if getattr(args, "operator_mode", None) in ("single", "study"):
+            cfg["operator_mode"] = args.operator_mode
+        if getattr(args, "leg_stance", None) in ("standing", "kneeling"):
+            cfg["leg_stance"] = args.leg_stance
+        elif getattr(args, "kneeling", None):        # legacy --kneeling
+            cfg["leg_stance"] = "kneeling"
+        if cfg.get("operator_mode") not in ("single", "study"):
+            cfg["operator_mode"] = "single"
+        if cfg.get("leg_stance") not in ("standing", "kneeling"):
+            cfg["leg_stance"] = "standing"
         for k in ("eco_mode", "arm_compliance", "transcribe_stereo"):
             v = getattr(args, k, None)
             if v is not None:
@@ -9600,6 +9883,8 @@ class StudyManagerApp(QMainWindow):
         if not hasattr(self, "_send_status_lbl"):
             return                                   # UI not fully built yet
         is_peer = (self._link_role() == "peer")
+        # All of these are study UI: single-operator mode keeps them hidden whatever the role.
+        study = self._dual_study
         # Master/standalone-ONLY controls — hidden on the peer because they do nothing (or
         # the wrong thing) there:
         #   * Crate tracking/calibration — external RealSense crate cameras are on the master.
@@ -9623,7 +9908,11 @@ class StudyManagerApp(QMainWindow):
             if _w is not None:
                 master_only.append(_w)
         for w in master_only:
-            w.setVisible(not is_peer)
+            w.setVisible(study and not is_peer)
+        # Single-operator mode plays back its own SOLO takes here (any link role).
+        if not study:
+            for w in (self._btn_view_recording, self._btn_open_twin):
+                w.setVisible(True)
         # Switched to peer with a transcriber already running → tear it down (frees the mic).
         if is_peer and self._transcriber is not None:
             self._shutdown_transcriber()
@@ -9635,16 +9924,246 @@ class StudyManagerApp(QMainWindow):
         # Sending this robot's data up to the master — peer only.
         for w in (self._master_dest_lbl, self._btn_test_dest, self._btn_send_master,
                   self._btn_send_past, self._send_status_lbl):
-            w.setVisible(is_peer)
+            w.setVisible(study and is_peer)
         # Crate contribution (head-cam viewpoint fed to the master's fusion) — peer only.
         for w in (self._contrib_hdr, self._btn_crate_contribute, self._btn_contrib_anchor,
                   self._rec_contrib_lbl):
-            w.setVisible(is_peer)
+            w.setVisible(study and is_peer)
         # Operator codes are ASSIGNED on the master (synced to the peer at Start Session), so
         # they're read-only on the peer.
         if hasattr(self, "_master_code_edit"):
             self._master_code_edit.setReadOnly(is_peer)
             self._peer_code_edit.setReadOnly(is_peer)
+
+    def _kneeling_active(self) -> bool:
+        """True when the robot uses the kneel stance (study mode always kneels)."""
+        return self._dual_study or self._leg_stance == "kneeling"
+
+    def _stance_legs(self):
+        """12-DOF leg hold for the ACTIVE stance (args.kneeling): the calibrated kneel, or
+        Unitree's standing default."""
+        return self._kneeling_angles if self._args.kneeling else self._standing_angles
+
+    def _apply_stance(self):
+        """Re-derive everything stance-dependent from _dual_study / _leg_stance. Idempotent
+        and safe at any time (before the UI / sim / control thread exist too).
+
+        Only valid BEFORE the physical bootup: the boot/shutdown choreography, leg gains and
+        held leg pose all follow the stance, so once the hardware has been driven
+        (_stance_locked) a change is REFUSED (logged) and the active stance is kept — restart
+        the manager to switch. In --dry_run nothing is ever locked (no hardware)."""
+        want = self._kneeling_active()
+        if getattr(self, "_stance_locked", False):
+            if want != bool(self._args.kneeling):
+                self._log(f"[stance] NOT switching to {'kneeling' if want else 'standing'}: "
+                          "the robot hardware is already booted in the "
+                          f"{'kneeling' if self._args.kneeling else 'standing'} stance. "
+                          "Restart the manager to change the leg stance.")
+            self._refresh_stance_ui()
+            return
+        changed = want != bool(self._args.kneeling)
+        self._args.kneeling = want
+        if not hasattr(self, "_standing_angles"):     # called mid-__init__: nothing else yet
+            return
+        self._kneeling_torso = (self._kneeling_cal.torso_offset_vector()
+                                if want else np.zeros(3))
+        legs = self._stance_legs()
+        if getattr(self, "_controller", None) is not None:
+            self._controller.q_goal_left_leg  = legs[:6].copy()
+            self._controller.q_goal_right_leg = legs[6:].copy()
+        # A control thread before the lock only exists in --dry_run (no hardware to move).
+        if getattr(self, "_control_thread", None) is not None:
+            self._control_thread.set_kneeling_pose(legs, self._kneeling_torso)
+        if changed and getattr(self, "_kneeling_window", None) is not None:
+            # Rebuilt on next open with the right enabled state.
+            self._kneeling_window.close()
+            self._kneeling_window = None
+        if changed:
+            self._log(f"[stance] leg stance → {'KNEELING' if want else 'STANDING (gantry)'}"
+                      + (" (study mode always kneels)" if self._dual_study else ""))
+        self._refresh_stance_ui()
+
+    def _refresh_stance_ui(self):
+        """Sync the stance selector + kneel-only buttons with the ACTIVE stance. The selector
+        is editable only in single-operator mode and before bootup."""
+        combo = getattr(self, "_stance_combo", None)
+        if combo is not None:
+            combo.blockSignals(True)
+            combo.setCurrentIndex(1 if self._args.kneeling else 0)
+            combo.blockSignals(False)
+            locked = getattr(self, "_stance_locked", False)
+            combo.setEnabled(not self._dual_study and not locked)
+            if self._dual_study:
+                tip = "Study (dual-operator) mode always kneels."
+            elif locked:
+                tip = "Locked: the robot is booted in this stance. Restart the manager to change it."
+            else:
+                tip = ("Standing: legs held in Unitree's standing pose — the robot MUST hang "
+                       "from a gantry/stand (no balance control). Kneeling: the study kneel "
+                       "with its staged boot-up / shutdown.")
+            combo.setToolTip(tip)
+        btn = getattr(self, "_btn_kneel_calib", None)
+        if btn is not None:
+            btn.setEnabled(bool(self._args.kneeling))
+            btn.setToolTip("" if self._args.kneeling
+                           else "Kneeling stance only (select Kneeling before bootup).")
+
+    def _on_stance_combo_changed(self, idx):
+        stance = "kneeling" if idx == 1 else "standing"
+        if self._dual_study or getattr(self, "_stance_locked", False):
+            self._log("[stance] leg stance is locked "
+                      + ("(study mode always kneels)." if self._dual_study
+                         else "(robot booted — restart the manager to change it)."))
+            self._refresh_stance_ui()
+            return
+        if stance == self._leg_stance:
+            return
+        self._leg_stance = stance
+        self._cfg["leg_stance"] = stance
+        self._save_cfg()
+        self._apply_stance()
+
+    # ── Operator mode: single operator (default) ⇄ dual-operator study ─────────
+    def _operator_mode_block_reason(self) -> str:
+        """Why the operator mode can't be switched right now ('' = it can). A switch changes
+        the solver, the leg stance and the running services, so it's only allowed at rest."""
+        dry = bool(self._args.dry_run)
+        if not dry and self._init_done and not self._hw_booted and not self._btn_bootup.isEnabled():
+            return "the robot is booting"
+        if not dry and self._hw_booted and not self._exit_damping_done:
+            return "the robot is booted — Safe Shutdown or E-STOP it first"
+        # Once booted, the stance is locked until a manager restart (Reboot re-runs the same
+        # stance's choreography), so refuse a switch that would change it (study kneels).
+        target_kneels = (not self._dual_study) or self._leg_stance == "kneeling"
+        if getattr(self, "_stance_locked", False) and target_kneels != bool(self._args.kneeling):
+            return "it would change the leg stance of a booted robot — restart the manager"
+        if self._state in (_S_TELEOP, _S_WAITING):
+            return "teleop is running — Stop & Lower Arms first"
+        if self._recording_active or self._session_open() or self._session_opening:
+            return "a study session is open — End Session first"
+        if self._solo_rec_active:
+            return "a recording is running — Stop Recording first"
+        if self._practice_active:
+            return "a practice round is running — end it first"
+        return ""
+
+    def _apply_status_panel_mode(self):
+        """Single-operator mode shows only THIS robot's robot / neck / ZED lights: the peer
+        robot, the external crate cams, the head cam (study localizer) and the ZED calib
+        (recording meta) would otherwise read as permanent failures."""
+        if not hasattr(self, "_status_robot_boxes"):
+            return
+        study = self._dual_study
+        for rid, g in self._status_robot_boxes.items():
+            g.setVisible(study or rid == self._robot_id)
+            g.setTitle(f"Robot {rid}"
+                       + ((" (Master)" if rid == 1 else " (Peer)") if study else ""))
+            for key in ("headcam", "zedcal"):
+                for w in self._light_rows[(rid, key)]:
+                    w.setVisible(study)
+        self._status_crate_box.setVisible(study)
+
+    def _apply_operator_mode(self, runtime=False):
+        """Apply self._dual_study to the UI (idempotent). At startup that's all — __init__ /
+        _init_core start the study services and build the solver for the mode. On a live
+        switch (runtime=True) it also re-tunes the solver, stops (→ single) or starts
+        (→ study) the study services, and re-applies the leg stance (study always kneels)."""
+        study = self._dual_study
+        self.setWindowTitle(self._window_title())
+        self._btn_operator_mode.setText(
+            "👥  Dual-Operator Study" if study else "👤  Single Operator")
+        self._btn_operator_mode.setStyleSheet(
+            "QPushButton { background: %s; color: white; font-weight: bold; padding: 6px 14px; }"
+            % ("#2980b9" if study else "#27ae60"))
+        self._operator_mode_lbl.setText(
+            "Study tools on: peer link, sessions + recording, cameras & calibration, twin."
+            if study else "Basic teleop of this robot — study tools hidden.")
+        for w in self._study_only_widgets:
+            w.setVisible(study)
+        for w in self._single_only_widgets:
+            w.setVisible(not study)
+        # Single mode: the twin panel keeps the live 3D viewer + playback of solo takes.
+        self._twin_box.setTitle("Digital Twin" if study else "Live Viewer & Playback")
+        self._apply_status_panel_mode()
+        self._apply_role_visibility()
+        self._apply_mode_visibility()
+        if not runtime:
+            return
+        # Stance FIRST (study always kneels): a failure in any step below must never leave
+        # the mode flipped with the old leg stance still armed for the next bootup.
+        self._apply_stance()
+
+        def _step(label, fn):
+            try:
+                fn()
+            except Exception as exc:                       # noqa: BLE001
+                self._log(f"[mode] {label} failed: {type(exc).__name__}: {exc}")
+
+        if self._solver is not None:
+            from proj_xrt.g1_adapter import STUDY_GEOMETRY_CONFIG
+            _step("wrist rate limit", lambda: self._solver.set_wrist_rate_limit(study))
+            _step("solver geometry", lambda: self._solver.set_geometry_config(
+                STUDY_GEOMETRY_CONFIG if study else None))
+        if study:
+            # What study startup runs: the peer link (if a role is set), the ZED calibration
+            # check and (master/standalone) room transcription.
+            if self._link is None and self._link_role() != "none":
+                _step("peer link start", self._init_link)
+            _step("ZED calibration check", self._check_zed_calibration)
+            if self._init_done and self._transcribe_on and self._transcription_allowed():
+                _step("transcriber start", self._init_transcriber)
+        else:
+            # Tear down every study service that may be running, via the normal stop paths.
+            if self._link is not None:
+                _step("peer link stop", self._on_disconnect_link)
+            if self._apriltag_tracker is not None:
+                _step("crate tracking stop", self._on_toggle_crate_tracking)
+            loc = self._headcam_localizer
+            if loc is not None:
+                if getattr(loc, "crate_contributing", False):
+                    _step("crate contribution stop", loc.disable_crate_contribution)
+                _step("head-cam localizer stop", self._on_toggle_headcam)
+            if self._wrench_worker is not None and self._wrench_worker.is_enabled():
+                _step("wrench live stop", self._on_toggle_wrench_live)
+            _step("transcriber stop", self._shutdown_transcriber)
+            for w in (self._headcam_view, self._transcript_window,
+                      self._checklist_window, self._calib_window):
+                if w is not None:
+                    _step("close study window", w.close)
+        self._refresh_transcribe_button()
+        self._update_buttons()
+
+    def _on_toggle_operator_mode(self):
+        why = self._operator_mode_block_reason()
+        if why:
+            self._log(f"[mode] can't switch operator mode now: {why}.")
+            return
+        to_study = not self._dual_study
+        if to_study:
+            text = ("Switch to DUAL-OPERATOR STUDY mode?\n\nShows the study tools (peer link, "
+                    "sessions + recording, cameras & calibration, digital twin), connects the "
+                    "peer link if a Link role is set, turns on the 30 rad/s wrist rate limit + "
+                    "study collision geometry, and the robot uses the kneeling stance.")
+        else:
+            text = ("Switch to SINGLE-OPERATOR mode?\n\nDisconnects the peer link, stops crate "
+                    "tracking / head-cam localization / transcription, hides the study tools "
+                    "and turns off the wrist rate limit + study collision geometry.")
+        if QMessageBox.question(self, "Switch operator mode", text,
+                                QMessageBox.Yes | QMessageBox.No,
+                                QMessageBox.No) != QMessageBox.Yes:
+            return
+        # The dialog runs a nested event loop: a peer link command may have opened a
+        # session / started teleop meanwhile, so check again before switching.
+        why = self._operator_mode_block_reason()
+        if why:
+            self._log(f"[mode] can't switch operator mode now: {why}.")
+            return
+        self._dual_study = to_study
+        self._cfg["operator_mode"] = "study" if to_study else "single"
+        self._save_cfg()
+        self._log("[mode] operator mode: "
+                  + ("DUAL-OPERATOR STUDY." if to_study else "SINGLE OPERATOR."))
+        self._apply_operator_mode(runtime=True)
 
     def _apply_mode_visibility(self):
         """User Study Mode hides the Good/Bad attempt-quality marking (buttons + label);
@@ -9678,9 +10197,176 @@ class StudyManagerApp(QMainWindow):
         self._robot_id = idx + 1
         self._cfg["robot_id"] = self._robot_id
         self._save_cfg()
-        self.setWindowTitle(
-            f"G1 Inspire Hand — User Study Manager  (Robot {self._robot_id})")
+        self.setWindowTitle(self._window_title())
+        self._apply_status_panel_mode()     # single mode shows only THIS robot's lights
         self._log(f"Robot identity set to {self._robot_id}.")
+
+    # ── Single-operator SOLO recording ──────────────────────────────────────────
+    # Layout: {output_dir}/solo_{YYYYmmdd}_{HHMMSS}/solo/attempt{K}/robot{N}/…  — the twin's
+    # merged robot{N}/ layout, ONE root per manager run, K = take number. digital_twin.py and
+    # session_viewer.py open it unchanged. Only this robot's raw CSV (+ tactile .bin + meta)
+    # and the operator's body-pose CSV are written: no cameras / crate / head-cam / peer.
+
+    def _refresh_solo_rec_ui(self):
+        btn = getattr(self, "_btn_solo_rec", None)
+        if btn is None:
+            return
+        on = self._solo_rec_active
+        text = "■  Stop Recording" if on else "⏺  Start Recording"
+        if btn.text() != text:
+            btn.setText(text)
+            btn.setStyleSheet(
+                "QPushButton { background: %s; color: white; font-weight: bold; padding: 8px; }"
+                % ("#c0392b" if on else "#8e44ad"))
+        btn.setEnabled(on or (self._init_done and self._solo_rec_ready()))
+        btn.setToolTip("" if on or self._solo_rec_ready()
+                       else "Boot up the robot first (a take must be all real motor data).")
+        if on:
+            lbl, color = f"● REC → {self._solo_take_name(self._solo_rec_dir)}", "#c0392b"
+        elif self._last_solo_dir:
+            lbl, color = f"Last take: {self._solo_take_name(self._last_solo_dir)}", "#8e44ad"
+        else:
+            lbl, color = "Recording: off", "gray"
+        if self._solo_rec_lbl.text() != lbl:
+            self._solo_rec_lbl.setText(lbl)
+            self._solo_rec_lbl.setStyleSheet(f"color: {color}; font-size: 10px;")
+
+    def _solo_rec_ready(self):
+        """Hardware runs record only once the robot is booted, so a take is never part sim
+        and part real; --dry_run (no hardware) always records the sim."""
+        return bool(self._args.dry_run) or self._hw_booted
+
+    @staticmethod
+    def _solo_take_name(path):
+        """'solo_<date>_<time>/attempt<K>' for a take's attempt or robot{N} folder."""
+        p = Path(path)
+        if p.name.startswith("robot"):
+            p = p.parent
+        return f"{p.parent.parent.name}/{p.name}"
+
+    def _solo_sim_q(self):
+        """This robot's sim joint angles per recorded segment — the SessionRecorder fallback
+        when there is no hardware (--dry_run / robot not booted)."""
+        if getattr(self, "_model", None) is None or getattr(self, "_data", None) is None:
+            return None
+        if self._solo_sim_addrs is None:
+            addrs = {}
+            for seg, names in (("legs", we.LEG_JOINTS), ("torso", we.TORSO_JOINTS),
+                               ("left", we.LEFT_ARM_JOINTS), ("right", we.RIGHT_ARM_JOINTS)):
+                try:
+                    addrs[seg] = [int(self._model.joint(n).qposadr[0]) for n in names]
+                except Exception:                          # noqa: BLE001
+                    pass
+            self._solo_sim_addrs = addrs
+        return {seg: self._data.qpos[a].copy() for seg, a in self._solo_sim_addrs.items()}
+
+    def _on_toggle_solo_recording(self):
+        if self._solo_rec_active:
+            self._solo_stop_recording()
+        else:
+            self._solo_start_recording()
+
+    def _solo_start_recording(self):
+        """Open a new solo take folder and start the robot CSV + body-pose recorders."""
+        if self._solo_rec_active:
+            return
+        if self._dual_study:
+            self._log("[record] study mode records through sessions (Start Session).")
+            return
+        if not self._init_done:
+            self._log("[record] wait for initialization to finish before recording.")
+            return
+        if not self._solo_rec_ready():
+            self._log("[record] boot up the robot first: a take recorded before bootup "
+                      "would mix sim poses with real motor data.")
+            return
+        if self._solo_root is None or not os.path.isdir(self._solo_root):
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            self._solo_root = os.path.abspath(
+                os.path.join(self._output_dir_path(), f"solo_{ts}"))
+        k = 1
+        while os.path.exists(os.path.join(self._solo_root, "solo", f"attempt{k}")):
+            k += 1
+        rid = self._robot_id
+        rec_dir = os.path.join(self._solo_root, "solo", f"attempt{k}", f"robot{rid}")
+        hw = self._session_recorder._hw is not None
+        meta = {
+            "model_path": _XML.as_posix(),
+            "session_label": f"solo_robot{rid}_attempt{k}",
+            "solo": True,                         # digital_twin: one robot, no table/crate
+            "operator_mode": "single",
+            "robot_id": rid,
+            "robots_total": 1,
+            "participant_id": "solo",
+            "trial_condition": "solo",
+            "attempt": k,
+            "kneeling": bool(self._args.kneeling),
+            "leg_stance": "kneeling" if self._args.kneeling else "standing",
+            "ik_rate": self._args.ik_rate,
+            "dry_run": bool(self._args.dry_run),
+            # hardware = real motor state; sim = no hardware, q_* from the sim (dq/tau/temp 0).
+            "robot_state_source": "hardware" if hw else "sim",
+            "left_offset": we.LEFT_EE_OFFSET.tolist(),
+            "right_offset": we.RIGHT_EE_OFFSET.tolist(),
+            "wrench_side": self._wrench_meta_side(),
+            "known_mass_g": None,
+            "wrench_baseline": (self._wrench_worker.baseline_dict()
+                                if self._wrench_worker is not None else {}),
+        }
+        try:
+            csv_path = self._session_recorder.start(
+                rec_dir, meta["session_label"], meta=meta,
+                record_tactile=not getattr(self._args, "no_tactile", False))
+        except Exception as exc:                          # noqa: BLE001
+            self._log(f"[record] could not start recording: {type(exc).__name__}: {exc}")
+            return
+        if self._device is not None:
+            try:
+                self._device.configure_recording(output_dir=rec_dir, record_data=True,
+                                                 started=False)
+            except Exception as exc:                      # noqa: BLE001
+                self._log(f"[record] body pose recording unavailable: {exc}")
+        self._solo_rec_dir = rec_dir
+        self._solo_rec_active = True
+        self._log(f"[record] ⏺ recording {self._solo_take_name(rec_dir)} → "
+                  f"{Path(csv_path).name}"
+                  + ("  (+ tactile .bin)" if self._session_recorder._tactile_width else "")
+                  + " + operator body pose.")
+        if not hw:
+            self._log("[record] no robot hardware — recording the SIM joint pose (q only; "
+                      "dq / torque / temperature are 0).")
+        self._update_buttons()
+
+    def _solo_stop_recording(self, reason=""):
+        """Finalize the current solo take (robot CSV + meta stop epoch, body-pose CSV)."""
+        if not self._solo_rec_active:
+            return
+        self._solo_rec_active = False
+        dev = self._device
+        if dev is not None and getattr(dev, "record_data", False):
+            try:
+                dev.configure_recording(output_dir=dev.output_dir, record_data=False,
+                                        started=False)
+            except Exception as exc:                      # noqa: BLE001
+                self._log(f"[record] body pose stop error: {exc}")
+        csv_path = self._session_recorder.stop()
+        rows = 0
+        try:
+            with open(csv_path) as f:
+                rows = max(0, sum(1 for _ in f) - 1)
+        except Exception:                                 # noqa: BLE001
+            pass
+        take = self._solo_take_name(self._solo_rec_dir)
+        if rows > 0:
+            self._last_solo_dir = os.path.dirname(self._solo_rec_dir)
+            self._log(f"[record] ■ saved {take} ({rows} robot frames)"
+                      + (f" — stopped by {reason}" if reason else "")
+                      + ". View Last / Open Digital Twin… to play it back.")
+        else:
+            self._log(f"[record] ■ {take}: NO robot frames were captured — nothing to play "
+                      "back" + (f" (stopped by {reason})" if reason else "") + ".")
+        self._solo_rec_dir = None
+        self._update_buttons()
 
     # ── Recording (continuous; per-trial / per-attempt subfolder rotation) ─────
     # Layout: {output_dir}/{pid}_robot{N}_{date}_{time}/{condition}/attempt{K}/…
@@ -9760,6 +10446,7 @@ class StudyManagerApp(QMainWindow):
             "trial_condition": cond,
             "attempt": attempt,
             "kneeling": bool(self._args.kneeling),
+            "leg_stance": "kneeling" if self._args.kneeling else "standing",
             "ik_rate": self._args.ik_rate,
             "left_offset": we.LEFT_EE_OFFSET.tolist(),
             "right_offset": we.RIGHT_EE_OFFSET.tolist(),
@@ -10774,7 +11461,7 @@ class StudyManagerApp(QMainWindow):
         manager kept running the study). Prevents the common footgun where, after a crash + manager
         restart, the operator forgets to press 📥 Resume Study and the two robots drift out of sync.
         Prefers the peer's LIVE state when linked (authoritative + current)."""
-        if self._resume_prompt_shown:
+        if self._resume_prompt_shown or not self._dual_study:
             return
         # Already in a session (armed or opening) → nothing to resume; stop checking.
         if self._session_open() or getattr(self, "_session_opening", False):
@@ -12660,6 +13347,12 @@ class StudyManagerApp(QMainWindow):
         if getattr(self, "_hw_booted", False):
             self._btn_bootup.setText("♻  Reboot")
             self._btn_bootup.setEnabled(True)
+        # 5) Finalize a single-operator solo take (study sessions survive an e-stop as before).
+        try:
+            if self._solo_rec_active:
+                self._solo_stop_recording("E-STOP")
+        except Exception:
+            pass
         try:
             self._update_buttons()
             self._refresh_status_panel()
@@ -12682,9 +13375,13 @@ class StudyManagerApp(QMainWindow):
         box.setText("Close the manager app?\n\nThis finalizes "
                     + ("the OPEN recording session, " if self._session_open() else "")
                     + "all recordings, stops the cameras/streaming and the peer link"
-                    + (f", and first runs the SAFE SHUTDOWN on the robot (arms out, "
-                       f"tilt forward, slow ~{lower_secs:g}s knee fold, then limp) — "
-                       "it is booted and has not been shut down"
+                    + ((f", and first runs the SAFE SHUTDOWN on the robot (arms out, "
+                        f"tilt forward, slow ~{lower_secs:g}s knee fold, then limp) — "
+                        "it is booted and has not been shut down"
+                        if self._args.kneeling else
+                        ", and first runs the SAFE SHUTDOWN on the robot (arms lower "
+                        "under damping, then limp in the gantry) — it is booted and has "
+                        "not been shut down")
                        if robot_up else "")
                     + ".")
         quit_btn = box.addButton("Shut down robot && Quit" if robot_up else "Quit",
@@ -12850,32 +13547,71 @@ class StudyManagerApp(QMainWindow):
         except Exception:
             pass
 
+    # Standing safe shutdown: seconds the arms are given to sink under the control loop's arm
+    # damping (legs/waist still held) before the whole body goes limp.
+    _STANDING_ARM_LOWER_SECS = 3.0
+
+    def _standing_safe_shutdown(self):
+        """STANDING (gantry) safe shutdown — none of the kneel choreography (no tilt / knee
+        fold: the gantry carries the robot). (1) Lower the arms with the SAME arm damping
+        'Stop & Lower Arms' uses (kp=0, kd>0: they sink under gravity without pushing on
+        anything) while the still-running control loop holds the legs + waist; (2) stop the
+        loop so the Controller is the sole publisher; (3) full-body damping — the legs go
+        limp and hang in the gantry."""
+        try:
+            self._log("*** SAFE SHUTDOWN (robot, STANDING) — lowering the arms under damping, "
+                      "then going limp (the gantry holds the robot). The manager stays "
+                      "open. ***")
+        except Exception:
+            pass
+        ct = self._control_thread
+        if ct is not None:
+            try:
+                ct.stop_teleop()
+                if self._hw_controller is not None and ct.is_alive():
+                    ct.enter_arm_damping()
+                    time.sleep(self._STANDING_ARM_LOWER_SECS)
+            except Exception:
+                pass
+            try:
+                ct.stop()          # ALWAYS stop it, so the damping below is never fought
+            except Exception:
+                pass
+        try:
+            if self._hw_controller is not None:
+                self._hw_controller.enter_damping(duration_s=1.0)
+        except Exception:
+            pass
+
     def _run_safe_shutdown_robot(self):
         """The PHYSICAL safe-shutdown (no dialog): stop the control loop, run the
         controlled forward-tilt + slow knee fold, go limp, flip the flags + UI.
         Shared by the Safe Shutdown button and Quit Manager."""
         lower_secs = max(0.0, float(getattr(self._args, 'shutdown_lower_secs', 15.0)))
-        try:
-            self._log(f"*** SAFE SHUTDOWN (robot) — raise the arms out to the sides "
-                      f"(drooped A-pose) off the table, tilt forward, fold knees into the "
-                      f"kneel slowly over ~{lower_secs:g}s, go limp. The manager stays "
-                      "open. ***")
-        except Exception:
-            pass
-        # Stop the teleop control loop so the low-level Controller is the SOLE publisher
-        # (otherwise the loop's stream fights the tilt/damp commands), then run the
-        # controlled forward fall right away (no long gap that could trip the watchdog).
-        try:
-            if self._control_thread is not None:
-                self._control_thread.stop_teleop()
-                self._control_thread.stop()
-        except Exception:
-            pass
-        try:
-            if self._hw_controller is not None:
-                self._forward_tilt_then_damp(self._hw_controller)
-        except Exception:
-            pass
+        if not self._args.kneeling:
+            self._standing_safe_shutdown()
+        else:
+            try:
+                self._log(f"*** SAFE SHUTDOWN (robot) — raise the arms out to the sides "
+                          f"(drooped A-pose) off the table, tilt forward, fold knees into the "
+                          f"kneel slowly over ~{lower_secs:g}s, go limp. The manager stays "
+                          "open. ***")
+            except Exception:
+                pass
+            # Stop the teleop control loop so the low-level Controller is the SOLE publisher
+            # (otherwise the loop's stream fights the tilt/damp commands), then run the
+            # controlled forward fall right away (no long gap that could trip the watchdog).
+            try:
+                if self._control_thread is not None:
+                    self._control_thread.stop_teleop()
+                    self._control_thread.stop()
+            except Exception:
+                pass
+            try:
+                if self._hw_controller is not None:
+                    self._forward_tilt_then_damp(self._hw_controller)
+            except Exception:
+                pass
         # Robot is down + limp; the APP stays alive. Mark damping done (a later Quit
         # must not re-damp the folded robot) and reflect the state in the UI.
         self._exit_damping_done = True
@@ -12906,12 +13642,18 @@ class StudyManagerApp(QMainWindow):
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Warning)
         box.setWindowTitle("Safe Shutdown (robot)")
-        box.setText("Safely shut down the ROBOT?\n\nIt will raise the arms OUT to the sides "
-                    "(drooped A-pose, clearing the table and the chest), tilt forward, "
-                    f"slowly fold into the kneel over ~{lower_secs:g}s, and go limp.\n\n"
-                    "The manager app STAYS OPEN (data / playback / peer link keep "
-                    "working) — use Quit Manager to close it. Teleop requires a manager "
-                    "restart afterwards.")
+        if self._args.kneeling:
+            box.setText("Safely shut down the ROBOT?\n\nIt will raise the arms OUT to the sides "
+                        "(drooped A-pose, clearing the table and the chest), tilt forward, "
+                        f"slowly fold into the kneel over ~{lower_secs:g}s, and go limp.\n\n"
+                        "The manager app STAYS OPEN (data / playback / peer link keep "
+                        "working) — use Quit Manager to close it. Teleop requires a manager "
+                        "restart afterwards.")
+        else:
+            box.setText("Safely shut down the ROBOT (standing stance)?\n\nThe arms lower under "
+                        f"damping (~{self._STANDING_ARM_LOWER_SECS:g}s), then the whole robot "
+                        "goes limp and hangs in the gantry.\n\nThe manager app STAYS OPEN — "
+                        "use Quit Manager to close it.")
         go = box.addButton("Shut down robot", QMessageBox.AcceptRole)
         box.addButton("Cancel", QMessageBox.RejectRole)
         box.setDefaultButton(box.buttons()[-1])   # default = Cancel
@@ -12919,7 +13661,11 @@ class StudyManagerApp(QMainWindow):
         if box.clickedButton() is not go:
             self._log("Safe Shutdown cancelled.")
             return
-        self._run_safe_shutdown_robot()
+        try:
+            self._run_safe_shutdown_robot()
+        finally:
+            if self._solo_rec_active:             # the descent is in the take; close it now
+                self._solo_stop_recording("Safe Shutdown")
         self._log("Robot is down and limp. The manager remains open — Quit Manager "
                   "closes it (recordings/cameras are finalized then).")
 
@@ -13176,6 +13922,15 @@ class StudyManagerApp(QMainWindow):
         is_idle     = self._state == _S_IDLE
         is_waiting  = self._state == _S_WAITING
         is_teleop   = self._state == _S_TELEOP
+        # Operator-mode switch: only at rest; the tooltip says what's blocking it.
+        if hasattr(self, "_btn_operator_mode"):
+            why = self._operator_mode_block_reason()
+            self._btn_operator_mode.setEnabled(not why)
+            tip = (f"Can't switch now: {why}." if why else
+                   "Switch between Single Operator (basic teleop of this robot) and the "
+                   "Dual-Operator Study (peer link, sessions, cameras, twin). Persisted.")
+            if self._btn_operator_mode.toolTip() != tip:
+                self._btn_operator_mode.setToolTip(tip)
         # Live 3D viewer toggle label reflects whether the window is currently open.
         if hasattr(self, "_btn_live_viewer"):
             self._btn_live_viewer.setText(
@@ -13322,7 +14077,8 @@ class StudyManagerApp(QMainWindow):
         self._btn_wrench_tare.setEnabled(worker_present)
         self._btn_wrench_clear_tare.setEnabled(worker_present)
         self._btn_view_recording.setEnabled(
-            bool(self._last_session_dir) and not self._recording_active)
+            bool(self._last_session_dir if self._dual_study else self._last_solo_dir)
+            and not self._recording_active and not self._solo_rec_active)
         # Digital twin: send this robot's session to the master. Locked for the WHOLE
         # open session (incl. armed gaps between takes) so an incomplete session is never
         # shipped; needs a finished session + no transfer already running.
@@ -13338,12 +14094,13 @@ class StudyManagerApp(QMainWindow):
         if hasattr(self, "_btn_pull_peer"):
             pulling = (self._pull_proc is not None and self._pull_proc.poll() is None)
             self._btn_pull_peer.setEnabled(not session_open and not sending and not pulling)
-        self._btn_open_twin.setEnabled(not self._recording_active)
+        self._btn_open_twin.setEnabled(not self._recording_active and not self._solo_rec_active)
         building = (self._dataset_proc is not None and self._dataset_proc.poll() is None)
         # Don't build a dataset from a session that's still open (armed or recording).
         self._btn_build_dataset.setEnabled(not session_open and not building)
         # Robot identity is locked for the whole session.
-        self._robot_combo.setEnabled(not session_open)
+        self._robot_combo.setEnabled(not session_open and not self._solo_rec_active)
+        self._refresh_solo_rec_ui()
         # Crate tracking controls.
         calib_running = (self._calib_proc is not None and self._calib_proc.poll() is None)
         tracking = self._apriltag_tracker is not None
@@ -13409,6 +14166,8 @@ class StudyManagerApp(QMainWindow):
 
         if self._session_open():
             self._on_stop_recording()
+        if self._solo_rec_active:
+            self._solo_stop_recording("Quit")
 
         if self._wrench_worker is not None:
             try:
@@ -13849,7 +14608,17 @@ def _build_argparser() -> argparse.ArgumentParser:
                    help="Damping gain (kd, kp=0) applied to the arm joints when "
                         "teleop is stopped, so the arms slowly lower under gravity "
                         "without pushing on objects while the body stays rigid.")
-    p.add_argument("--kneeling", action="store_true", default=True)
+    p.add_argument("--operator-mode", dest="operator_mode", choices=("single", "study"),
+                   default=None,
+                   help="single (default): one operator, study machinery off; study: the "
+                        "dual-operator user study. Defaults to the persisted choice.")
+    p.add_argument("--leg-stance", dest="leg_stance", choices=("standing", "kneeling"),
+                   default=None,
+                   help="Single-operator leg stance. standing (default) holds Unitree's "
+                        "standing pose and REQUIRES a gantry/stand; kneeling uses the study "
+                        "kneel with its staged boot-up/shutdown. Study mode always kneels.")
+    p.add_argument("--kneeling", action="store_true", default=None,
+                   help="Deprecated alias for --leg-stance kneeling.")
     p.add_argument("--transition_duration", type=float, default=4.0,
                    help="Seconds for the staged teleop-entry choreography (lateral "
                         "raise -> back -> chicken wing -> sweep into the operator's "
