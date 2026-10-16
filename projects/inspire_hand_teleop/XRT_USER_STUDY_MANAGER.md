@@ -97,8 +97,8 @@ Companion docs: `APRILTAG_STUDY_SETUP.md` (camera / Jetson / NTP setup),
 ```
 
 - **Inter-laptop link**: two **chained WiFi routers** — the master's router feeds the
-  peer's router downstream (plain private LAN, `192.168.7.x`; **no VPN/Tailscale**).
-  Master laptop e.g. `192.168.7.226`.
+  peer's router downstream (plain private LAN; **no VPN/Tailscale**).
+  The peer dials the master laptop's address on that LAN (`<master-ip>`).
 - **StudyLink** (`study_link.py`): a single persistent TCP socket (**:5070**, master
   listens, peer dials, auto-reconnect). Carries tiny JSON messages only — never video:
   - **commands** master↔peer, executed at a **shared epoch** (`_sync_or_local`) so both

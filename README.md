@@ -128,8 +128,9 @@ For the study workflow, cameras, networking, safety systems, and recorded datase
 layout, see [XRT_USER_STUDY_MANAGER.md](projects/inspire_hand_teleop/XRT_USER_STUDY_MANAGER.md)
 and [STUDY_PREFLIGHT_CHECKLIST.txt](projects/inspire_hand_teleop/STUDY_PREFLIGHT_CHECKLIST.txt).
 
-The Quest client connects to the WebRTC server on port 8080.  The headset installation
-guide is maintained at <https://xr-robot-teleop-website.pages.dev/>.
+The Quest client connects to the WebRTC server on port 8080. Install it from the
+[XRT-Client releases](https://github.com/Euler-Rodrigues-Lab/XRT-Client/releases/latest)
+(prebuilt APK); project website: <https://xrt-teleop.github.io>.
 
 ## Source layout
 

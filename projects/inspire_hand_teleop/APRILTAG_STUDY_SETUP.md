@@ -122,7 +122,7 @@ Jetson streams its frames to the laptop. Do this on **both** robots' Jetsons.
 scp ~/proj_XRT/projects/inspire_hand_teleop/g1_headcam_server.py \
     unitree@<jetson-ip>:~/        # robot 1 Jetson is typically 192.168.123.164
 ```
-Default Jetson login: user `unitree`, password `123` (or `Unitree0408`).
+Log in as the Jetson's `unitree` user (see Unitree's G1 documentation; change the factory password).
 
 ### 4b. Free the camera from the SONIC server + verify (on the Jetson)
 The head D435i is held by NVIDIA's `composed_camera_server.service` (the SONIC /
