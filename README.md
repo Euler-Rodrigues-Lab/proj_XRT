@@ -5,11 +5,22 @@ Inspire tactile hands, built on the shared G1 robot and XR device packages.
 
 Robot models, simulation controllers, arm/torso/hand retargeting, collision filtering,
 and the base G1 hardware interfaces are owned by the pinned `g1_teleop` submodule.
-XRT_devices owns WebRTC/OpenXR input, process isolation, transport telemetry, body-pose
+[XRT_devices](https://github.com/Euler-Rodrigues-Lab/XRT_devices) owns WebRTC/OpenXR input, process isolation, transport telemetry, body-pose
 recording, and the optional ZED streaming launcher. This repository owns the study manager,
 tactile and haptic policy, camera/localization orchestration, hardware safety extensions, and
 digital-twin playback.  The compatibility modules under `projects/g1_*` are adapters,
 not a second copy of the retargeting implementation.
+
+Project website: <https://xrt-teleop.github.io>
+
+### Related repositories
+
+| Repository | Role |
+| :--- | :--- |
+| [`XRT-Client`](https://github.com/Euler-Rodrigues-Lab/XRT-Client) | Unity app for Meta Quest 3 (prebuilt APK in its [releases](https://github.com/Euler-Rodrigues-Lab/XRT-Client/releases/latest)): pose streaming, video, contact cues |
+| [`XRT_devices`](https://github.com/Euler-Rodrigues-Lab/XRT_devices) | WebRTC headset receiver, process isolation, body-pose recording and playback (submodule of `g1_teleop`) |
+| [`g1_teleop`](https://github.com/Euler-Rodrigues-Lab/g1_teleop) | G1 models, simulation and controllers, retargeting (submodule at `external/g1_teleop`) |
+| [`geo_kin_core`](https://github.com/Euler-Rodrigues-Lab/geo_kin_core) | SEW-Mimic geometric retargeting interface |
 
 ## Clone and install
 
