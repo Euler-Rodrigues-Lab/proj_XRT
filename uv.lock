@@ -1295,7 +1295,7 @@ requires-dist = [
     { name = "numpy", specifier = "<2" },
     { name = "opencv-python", marker = "extra == 'study'" },
     { name = "pupil-apriltags", marker = "extra == 'study'" },
-    { name = "pymodbus", marker = "extra == 'hardware'" },
+    { name = "pymodbus", marker = "extra == 'hardware'", specifier = ">=3.10" },
     { name = "pyqt5", marker = "extra == 'study'" },
     { name = "pyrealsense2", marker = "extra == 'study'" },
     { name = "pyserial", marker = "extra == 'hardware'" },

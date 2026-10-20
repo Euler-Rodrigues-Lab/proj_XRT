@@ -75,7 +75,9 @@ class _MotionSwitcherClient(_RpcClient if _RpcClient is not None else object):
 
 
 def release_motion_mode():
-    """Release the high-level locomotion FSM so low-level control has exclusive ownership."""
+    """Release the high-level locomotion FSM so low-level control has exclusive ownership.
+
+    Returns True once CheckMode reports no active motion mode (debug / developer mode)."""
     if _RpcClient is None:
         raise ImportError("release_motion_mode requires unitree_sdk2py")
     try:
@@ -91,7 +93,7 @@ def release_motion_mode():
             name = result.get("name", "")
             if not name:
                 print("  [MSC] No active motion mode — low-level control is exclusive.")
-                break
+                return True
             print(f"  [MSC] Active mode='{name}', calling ReleaseMode...")
             rel_code = msc.ReleaseMode()
             print(f"  [MSC] ReleaseMode returned code={rel_code}")
@@ -100,6 +102,7 @@ def release_motion_mode():
     except Exception as e:
         print(f"[MSC] Exception in release_motion_mode: {e}")
         import traceback; traceback.print_exc()
+    return False
 
 # Import ostrich neck hardware 
 # Optionally import the Ostrich neck hardware interface for physical neck actuation

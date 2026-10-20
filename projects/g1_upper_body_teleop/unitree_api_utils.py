@@ -13,6 +13,7 @@ from .common.common.command_helper import (
 )
 from .common.common.rotation_helper import get_gravity_orientation, transform_imu_data
 from .config import Config
+from g1_teleop.control.hw.crc import lowcmd_crc
 
 
 def _load_sdk():
@@ -31,7 +32,6 @@ def _load_sdk():
         from unitree_sdk2py.idl.unitree_go.msg.dds_ import WirelessController_
         from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowCmd_ as LowCmdHG
         from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowState_ as LowStateHG
-        from unitree_sdk2py.utils.crc import CRC
     except ImportError as exc:
         raise ImportError(
             "Unitree hardware control requires unitree_sdk2py; install the "
@@ -167,7 +167,7 @@ class Controller:
     def send_cmd(self, cmd: Union[LowCmdGo, LowCmdHG]):
         if self.config.msg_type == "hg":
             cmd.mode_machine = self.mode_machine_
-        cmd.crc = CRC().Crc(cmd)
+        cmd.crc = lowcmd_crc(cmd)
         self.lowcmd_publisher_.Write(cmd)
 
     def wait_for_low_state(self):

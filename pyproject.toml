@@ -19,7 +19,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-hardware = ["pymodbus", "pyserial", "dynamixel-sdk", "unitree-sdk2py"]
+hardware = ["pymodbus>=3.10", "pyserial", "dynamixel-sdk", "unitree-sdk2py"]
 study = [
     "PyQt5",
     "opencv-python",

@@ -6409,11 +6409,11 @@ class StudyManagerApp(QMainWindow):
             # No hardware to boot — go straight to ready.
             self._finish_bootup()
         else:
-            # HARDWARE IS NOT TOUCHED YET: the robot boots only when the operator
+            # NO JOINT COMMANDS YET: the robot boots only when the operator
             # presses 🤖 Bootup Robot (top right). Until then teleop/session controls
             # stay disabled (state INIT = not ready).
             self._btn_bootup.setEnabled(True)
-            self._log("System initialized — hardware connected (read-only). Press "
+            self._log("System initialized — hardware connected, no joint commands sent. Press "
                       "🤖 Bootup Robot (top right) to run the robot bootup sequence.")
         self._update_buttons()
 
@@ -6544,13 +6544,42 @@ class StudyManagerApp(QMainWindow):
             from projects.g1_upper_body_teleop.unitree_api_utils import Controller as UnitreeController
             self._hw_controller = UnitreeController(config)
             self._log("G1 hardware connected.")
+            if args.release_fsm_on_launch:
+                # Put the G1 into developer (debug) mode right away: release the onboard
+                # sport/locomotion FSM so it can't hold or re-stand the robot before the
+                # operator runs 🤖 Bootup Robot. Its balance controller turns OFF here, so
+                # the robot must already be on the gantry / rig.
+                self._log("Releasing the G1 high-level motion mode (developer mode) — the "
+                          "robot must be supported by the gantry / rig...")
+                from projects.inspire_hand_teleop.demo_g1_inspire_xr_robot_teleop_full_body_hw \
+                    import release_motion_mode
+                if release_motion_mode():
+                    self._log("G1 in developer mode: no high-level motion mode active.")
+                else:
+                    self._log("*** WARNING: could not confirm the G1 left its high-level motion "
+                              "mode (see the terminal [MSC] lines). Bootup retries the release; "
+                              "if it persists, enter debug mode from the Unitree remote. ***")
 
             self._log("Connecting to Inspire hands...")
             self._hand_controller = InspireHandController(
                 hand_side='b', initialize_dds=False, haptics_only=True
             )
+            linked = self._hand_controller.connected_sides()
+            if not linked:
+                # Run without hands: every hand consumer (bootup gesture, teleop, haptics,
+                # tactile recording, calibration) already treats None as "no hands".
+                self._log("*** Inspire hands NOT reachable (192.168.123.210 / .211) — running "
+                          "WITHOUT hands: no finger control, haptics or tactile data. ***")
+                self._hand_controller.close()
+                self._hand_controller = None
+            elif len(linked) == 1:
+                missing = "right" if linked == ["l"] else "left"
+                self._log(f"*** Only one Inspire hand is reachable — the {missing} hand is "
+                          "not connected and is skipped. ***")
+            else:
+                self._log("Inspire hands connected.")
 
-            if not args.no_haptics:
+            if not args.no_haptics and self._hand_controller is not None:
                 self._haptics_streamer = InspireHandHapticsStreamer(
                     self._hand_controller, self._device, rate_hz=120, debug=False,
                     default_deadband=args.haptic_deadband,
@@ -6572,10 +6601,10 @@ class StudyManagerApp(QMainWindow):
             self._sync_sim(q_right, q_left, q_torso)
             mujoco.mj_forward(self._model, self._data)
 
-            # Physical bootup (release FSM, hand fist, arm choreography, rise, damp)
-            # NO LONGER runs here — the operator triggers it with the 🤖 Bootup Robot
-            # button (_on_bootup_robot -> _bootup_robot_hw). Until then the robot is
-            # untouched: hardware is connected read-only (state cache, monitors).
+            # Physical bootup (hand fist, arm choreography, rise, damp) NO LONGER runs
+            # here — the operator triggers it with the 🤖 Bootup Robot button
+            # (_on_bootup_robot -> _bootup_robot_hw). Until then no joint commands are
+            # sent: only the FSM release above (unless --no-release-fsm-on-launch).
         else:
             self._log("Dry-run mode: hardware commands disabled.")
 
@@ -14721,6 +14750,12 @@ def _build_argparser() -> argparse.ArgumentParser:
                    help="Max kp reduction fraction (0..1) the leg governor may apply to the "
                         "hip/waist-pitch. Deliberately small — over-softening a load-bearing "
                         "joint risks the kneel collapsing.")
+    p.add_argument("--release-fsm-on-launch", dest="release_fsm_on_launch",
+                   action=argparse.BooleanOptionalAction, default=True,
+                   help="Put the G1 into developer (debug) mode at launch by releasing its "
+                        "high-level motion FSM (DEFAULT ON). This turns the robot's own balance "
+                        "controller off, so it must be on the gantry / rig; pass "
+                        "--no-release-fsm-on-launch to leave the FSM until Bootup.")
     p.add_argument("--waist-locked", dest="waist_locked",
                    action=argparse.BooleanOptionalAction, default=True,
                    help="A mechanical waist lock is installed (DEFAULT ON). Idles the waist "

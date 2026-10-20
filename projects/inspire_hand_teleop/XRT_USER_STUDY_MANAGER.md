@@ -352,7 +352,7 @@ a per-take `latency_summary.json`.
 
 ## 11. Operating flow (summary)
 
-**Per day**: robots + Jetsons on → managers on both laptops (launch touches no hardware) → **🤖 Bootup Robot** on each (confirmation-guarded; runs the physical bootup + starts the control loop) → link light green → Quests
+**Per day**: robots + Jetsons on → managers on both laptops (launch releases the G1 high-level FSM into developer mode — robot on its rig — but sends no joint commands) → **🤖 Bootup Robot** on each (confirmation-guarded; runs the physical bootup + starts the control loop) → link light green → Quests
 connected (check "Unity command channel OPEN") → peer shows "Master link OK ✓".
 
 **Per participant**: Pre-Flight Checklist → drag-rank trial order → **Prepare Study**

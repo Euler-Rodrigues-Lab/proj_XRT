@@ -346,7 +346,7 @@ class InspireHandController:
     def _read_input_registers(self, client: ModbusTcpClient, address: int, count: int) -> list[int] | None:
         """Read input registers and return None on Modbus exception responses."""
         with self._get_io_lock(client):
-            response = client.read_holding_registers(address, count, slave=self.device_id)
+            response = client.read_holding_registers(address, count=count, device_id=self.device_id)
         if response.isError():
             print(f"Modbus read error at address={address}, count={count}: {response}")
             return None
@@ -709,13 +709,13 @@ class InspireHandController:
         try:
             with self._get_io_lock(client):
                 if mode & self.ActStates.ANGLE:  # Angle mode
-                    client.write_registers(self.RegAddr.ANGLE_SET, kwargs.get('angle_set', [0]*6), self.device_id)
+                    client.write_registers(self.RegAddr.ANGLE_SET, kwargs.get('angle_set', [0]*6), device_id=self.device_id)
                 if mode & self.ActStates.POSITION:  # Position mode
-                    client.write_registers(self.RegAddr.POS_SET, kwargs.get('pos_set', [0]*6), self.device_id)
+                    client.write_registers(self.RegAddr.POS_SET, kwargs.get('pos_set', [0]*6), device_id=self.device_id)
                 if mode & self.ActStates.FORCE:  # Force mode
-                    client.write_registers(self.RegAddr.FORCE_SET, kwargs.get('force_set', [0]*6), self.device_id)
+                    client.write_registers(self.RegAddr.FORCE_SET, kwargs.get('force_set', [0]*6), device_id=self.device_id)
                 if mode & self.ActStates.VELOCITY:  # Velocity (speed) mode
-                    client.write_registers(self.RegAddr.SPEED_SET, kwargs.get('speed_set', [0]*6), self.device_id)
+                    client.write_registers(self.RegAddr.SPEED_SET, kwargs.get('speed_set', [0]*6), device_id=self.device_id)
             self._note_io_success()
             return True
         except Exception as e:
@@ -768,7 +768,7 @@ class InspireHandController:
         def _zero(client) -> bool:
             try:
                 with self._get_io_lock(client):
-                    client.write_registers(self.RegAddr.GESTURE_FORCE_CLB, [1], self.device_id)
+                    client.write_registers(self.RegAddr.GESTURE_FORCE_CLB, [1], device_id=self.device_id)
                 return True
             except Exception as e:
                 print(f"Force-sensor calibration write failed: {e}")
@@ -904,6 +904,26 @@ class InspireHandController:
             speed_set=velocities
         )
     
+    def connected_sides(self) -> list[str]:
+        """Hand sides ('l' / 'r') whose Modbus TCP link connected."""
+        if self.hand_side == 'b':
+            return [side for side, client in (('l', self.client_left), ('r', self.client_right))
+                    if client.connected]
+        return [self.hand_side] if self.client.connected else []
+
+    def close(self):
+        """Stop the worker threads and close the Modbus links without sending a command
+        (for hands that never connected, where stop() would only time out)."""
+        self._is_engaged = False
+        self._running = False
+        for _attr in ('_actuator_thread', '_sensor_thread', '_sensor_thread_left', '_sensor_thread_right'):
+            _t = getattr(self, _attr, None)
+            if _t is not None and _t.is_alive():
+                _t.join(timeout=0.5)
+        for client in (self.client, getattr(self, 'client_left', None), getattr(self, 'client_right', None)):
+            if client is not None:
+                client.close()
+
     def stop(self):
         """
         Send a no-operation command (mode 0) and stop thread.
