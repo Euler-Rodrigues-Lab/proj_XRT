@@ -15,7 +15,7 @@ dependencies = [
     "scipy",
     "mujoco>=3",
     "PyYAML",
-    "xrt-devices[xr,recording]>=0.1.0",
+    "eurola-xrt-devices[xr,recording]==0.1.2",
 ]
 
 [project.optional-dependencies]
@@ -27,7 +27,7 @@ study = [
     "pyrealsense2",
 ]
 transcription = ["faster-whisper", "sounddevice", "speechbrain"]
-test = ["pytest", "geo-kin-core[fallback]"]
+test = ["pytest", "eurola-geo-kin-core[fallback]==0.1.2"]
 
 [project.scripts]
 xrt-g1 = "proj_xrt.cli:teleop"
@@ -55,6 +55,4 @@ testpaths = ["tests"]
 [tool.uv.sources]
 g1-teleop = { path = "external/g1_teleop", editable = true }
 
-xrt-devices = { path = "external/g1_teleop/external/XRT_devices", editable = true }
-geo-kin-core = { path = "external/g1_teleop/external/geo_kin_core", editable = true }
 unitree-sdk2py = { git = "https://github.com/unitreerobotics/unitree_sdk2_python.git" }

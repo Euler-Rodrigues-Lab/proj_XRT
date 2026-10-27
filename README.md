@@ -1,5 +1,28 @@
 # XRT — Extended-Reality Teleoperation
 
+## Shared Python dependencies
+
+`geo_kin_core` and `xrt_devices` now come from versioned PyPI wheels, not Git
+submodules. The tested versions for this checkout are:
+
+```bash
+python -m pip install "eurola-geo-kin-core==0.1.2" "eurola-xrt-devices==0.1.2"
+```
+
+For an existing editable installation, run `python -m pip uninstall geo-kin-core xrt-devices`
+before installing the renamed packages, or use `uv sync` to reconcile the lockfile.
+
+Normal project installation (`uv sync` or `pip install` with the project and its
+local robot/simulator dependencies) selects these versions automatically. Imports
+and the `geo-kin-provision` command are unchanged. Other robot, simulator, and
+hardware submodules remain where needed; `--recurse-submodules` below is for those.
+The private `geo_kin` solver and its license are still supplied separately.
+
+For shared-library development, explicitly install matching source checkouts with
+`python -m pip install -e /path/to/geo_kin_core -e /path/to/XRT_devices` and run the
+venv's Python directly. A subsequent `uv sync` restores the released packages.
+
+
 XRT is the application and study layer for XR teleoperation of a Unitree G1 with
 Inspire tactile hands, built on the shared G1 robot and XR device packages.
 
@@ -157,7 +180,7 @@ pass, not duplicating them into the G1 dependency.
 ```text
 external/g1_teleop/                 pinned G1 base (Git submodule)
 proj_xrt/                          application CLI and G1 API adapter
-external/g1_teleop/external/XRT_devices/  shared input, feedback, recording, video
+eurola-xrt-devices (PyPI)               shared input, feedback, recording, video
 projects/g1_upper_body_teleop/      XRT's study-specific DDS safety extensions
 projects/g1_full_body_kinematic/    legacy API adapters onto g1_teleop
 projects/inspire_hand_teleop/       manager, haptics, sensing, calibration, playback
